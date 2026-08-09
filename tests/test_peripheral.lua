@@ -55,6 +55,10 @@ local no_read = #sent
 local result, running_err = peripheral.refresh()
 check('running refresh rejected', result == nil and running_err == 'target must be stopped')
 check('running refresh sends no request', #sent == no_read)
+local element = peripheral.element()
+local element_lines = vim.api.nvim_buf_get_lines(element.buffer(), 0, -1, false)
+local element_text = table.concat(element_lines, '\n')
+check('dapui SVD element shows peripherals', element_text:find('BASE', 1, true) ~= nil)
 
 io.stdout:write(string.format('%d/%d peripheral checks passed\n', total - failures, total))
 os.exit(failures == 0 and 0 or 1)

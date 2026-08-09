@@ -240,6 +240,16 @@ available for the same session.
 | `:CortexDebugCallStackRefresh` | request `stackTrace` while stopped |
 | `:CortexDebugStack` | alias for `:CortexDebugCallStack` |
 
+## nvim-dap-ui integration
+
+The auxiliary views can be embedded in nvim-dap-ui layouts without forking
+nvim-dap-ui. Register `cortex_callstack`, `cortex_rtos`, and
+`cortex_peripherals` with `dapui.register_element()` using the corresponding
+`callstack_element()`, `rtos_element()`, and `peripheral_element()` APIs. They
+then behave like normal dapui layout panes; the SVD pane includes the
+peripheral rows above its registers. `close_views()` closes standalone Cortex
+windows and cancels their pending reads.
+
 ## Five value views
 
 These views are intentionally separate:

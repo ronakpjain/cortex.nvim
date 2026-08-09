@@ -1745,6 +1745,7 @@ local function on_session_end()
   peripheral.on_session_end()
   rtos.on_session_end()
   callstack.on_session_end()
+  M.close_views()
   watch.session_config = nil
   for _, e in ipairs(watch.entries) do
     if e.kind == 'symbol' then
@@ -1893,6 +1894,10 @@ function M.peripheral_refresh(callback)
   return peripheral.refresh(callback)
 end
 
+function M.peripheral_element()
+  return peripheral.element()
+end
+
 function M.peripheral_load(config)
   return peripheral.load(config)
 end
@@ -1913,6 +1918,10 @@ function M.rtos_refresh(callback)
   return rtos.refresh(callback)
 end
 
+function M.rtos_element()
+  return rtos.element()
+end
+
 function M.callstack_open()
   return callstack.open()
 end
@@ -1927,6 +1936,17 @@ end
 
 function M.callstack_refresh(callback)
   return callstack.refresh(callback)
+end
+
+function M.callstack_element()
+  return callstack.element()
+end
+
+function M.close_views()
+  M.close()
+  peripheral.close()
+  rtos.close()
+  callstack.close()
 end
 
 function M.debug_select()

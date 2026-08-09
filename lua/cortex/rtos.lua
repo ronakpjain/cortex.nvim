@@ -20,6 +20,7 @@ local state = {
   cancel_refresh = nil,
   bufnr = nil,
   winid = nil,
+  element_mode = false,
 }
 P._state = state
 
@@ -601,6 +602,14 @@ local function win_valid()
   return state.winid and api.nvim_win_is_valid(state.winid)
 end
 
+local function view_win()
+  if win_valid() then return state.winid end
+  if state.element_mode and buf_valid() and api.nvim_get_current_buf() == state.bufnr then
+    return api.nvim_get_current_win()
+  end
+  return nil
+end
+
 local function render()
   if not buf_valid() then return end
   local count = state.task_count and ('  ' .. tostring(state.task_count) .. ' tasks') or ''
@@ -638,9 +647,18 @@ local function create_buf()
   pcall(api.nvim_buf_set_name, bufnr, 'cortex://freertos')
   local opts = { buffer = bufnr, nowait = true, silent = true }
   local function mouse_focus()
-    ui.mouse_line(state.winid)
+    local winid = view_win()
+    if winid then ui.mouse_line(winid) end
   end
-  vim.keymap.set('n', 'q', P.close, opts)
+  local function close_from_buffer()
+    if state.element_mode then
+      local ok, dapui = pcall(require, 'dapui')
+      if ok and dapui.close then dapui.close() end
+    else
+      P.close()
+    end
+  end
+  vim.keymap.set('n', 'q', close_from_buffer, opts)
   vim.keymap.set('n', 'r', function() P.refresh() end, opts)
   vim.keymap.set('n', '<LeftMouse>', mouse_focus, opts)
   vim.keymap.set('n', '<2-LeftMouse>', mouse_focus, opts)
@@ -680,17 +698,46 @@ local function open_window()
 end
 
 function P.open()
+  if state.element_mode then
+    create_buf()
+    render()
+    return nil
+  end
   open_window()
   return state.winid
 end
 
 function P.close()
+  if state.cancel_refresh then state.cancel_refresh('view closed') end
+  if state.element_mode then return end
   if win_valid() then pcall(api.nvim_win_close, state.winid, true) end
   state.winid = nil
 end
 
 function P.toggle()
+  if state.element_mode then
+    local ok, dapui = pcall(require, 'dapui')
+    if ok and dapui.float_element then
+      dapui.float_element('cortex_rtos', { width = 110, height = 20, enter = true })
+    end
+    return
+  end
   if win_valid() then P.close() else P.open() end
+end
+
+---Register this view as an nvim-dap-ui layout element.
+function P.element()
+  state.element_mode = true
+  create_buf()
+  render()
+  return {
+    buffer = function() return create_buf() end,
+    render = render,
+    allow_without_session = true,
+    float_defaults = function()
+      return { width = 110, height = 20, enter = true, title = 'Cortex FreeRTOS Tasks' }
+    end,
+  }
 end
 
 function P.refresh(callback)
@@ -764,7 +811,7 @@ end
 function P.on_session_stopped()
   state.status = 'stopped (refresh available)'
   render()
-  if win_valid() and config().auto_refresh_on_stop then P.refresh() end
+  if (win_valid() or state.element_mode) and config().auto_refresh_on_stop then P.refresh() end
 end
 
 function P.on_session_end()

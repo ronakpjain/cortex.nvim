@@ -22,6 +22,7 @@ local state = {
   expanded = {},
   status = 'not loaded',
   refreshing = false,
+  element_mode = false,
   cancel_refresh = nil,
 }
 P._state = state
@@ -272,6 +273,15 @@ local function render()
   vim.bo[state.bufnr].modifiable = false
 end
 
+local function view_win()
+  if state.winid and api.nvim_win_is_valid(state.winid) then return state.winid end
+  if state.element_mode and state.bufnr and api.nvim_buf_is_valid(state.bufnr)
+      and api.nvim_get_current_buf() == state.bufnr then
+    return api.nvim_get_current_win()
+  end
+  return nil
+end
+
 local function toggle_current()
   local item = state.line_map[api.nvim_win_get_cursor(0)[1]]
   if not item then return end
@@ -292,9 +302,18 @@ local function create_buf()
   pcall(api.nvim_buf_set_name, state.bufnr, 'cortex://peripherals')
   local opts = { buffer = state.bufnr, nowait = true, silent = true }
   local function mouse_toggle()
-    if ui.mouse_line(state.winid) then toggle_current() end
+    local winid = view_win()
+    if winid and ui.mouse_line(winid) then toggle_current() end
   end
-  vim.keymap.set('n', 'q', P.close, opts)
+  local function close_from_buffer()
+    if state.element_mode then
+      local ok, dapui = pcall(require, 'dapui')
+      if ok and dapui.close then dapui.close() end
+    else
+      P.close()
+    end
+  end
+  vim.keymap.set('n', 'q', close_from_buffer, opts)
   vim.keymap.set('n', '<CR>', toggle_current, opts)
   vim.keymap.set('n', 'r', P.refresh, opts)
   vim.keymap.set('n', '<LeftMouse>', mouse_toggle, opts)
@@ -328,17 +347,48 @@ end
 
 function P.open()
   if not state.model then P.load(state.session_config or {}) end
-  create_buf(); open_window(); render()
+  create_buf()
+  if state.element_mode then
+    render()
+    return state.bufnr
+  end
+  open_window(); render()
   return state.bufnr
 end
 
 function P.close()
+  if state.cancel_refresh then state.cancel_refresh('view closed') end
+  close_telnet()
+  if state.element_mode then return end
   if state.winid and api.nvim_win_is_valid(state.winid) then pcall(api.nvim_win_close, state.winid, true) end
   state.winid = nil
 end
 
 function P.toggle()
+  if state.element_mode then
+    local ok, dapui = pcall(require, 'dapui')
+    if ok and dapui.float_element then
+      dapui.float_element('cortex_peripherals', { width = 110, height = 24, enter = true })
+    end
+    return
+  end
   if state.winid and api.nvim_win_is_valid(state.winid) then P.close() else P.open() end
+end
+
+---Register this tree as an nvim-dap-ui layout element.
+function P.element()
+  state.element_mode = true
+  create_buf()
+  if not state.model and state.session_config then P.load(state.session_config) end
+  render()
+  return {
+    buffer = function() return create_buf() end,
+    render = render,
+    allow_without_session = true,
+    float_defaults = function()
+      return { width = 110, height = 24, enter = true, title = 'Cortex SVD Peripherals' }
+    end,
+  }
 end
 
 --- Refresh register values. This is deliberately rejected unless stopped.
