@@ -35,6 +35,10 @@ echo "== peripheral browser tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_peripheral.lua"
 
 echo
+echo "== RTOS browser tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_rtos.lua"
+
+echo
 echo "== live-watch hydration tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_live_watch.lua"
 

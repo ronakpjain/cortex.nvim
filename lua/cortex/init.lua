@@ -15,6 +15,7 @@
 ---   require('cortex').add(expr)     -- :CortexDebugWatchAdd
 ---   require('cortex').clear()       -- :CortexDebugWatchClear
 ---   require('cortex').telnet(cmd)   -- :CortexDebugTelnet
+---   require('cortex').rtos_toggle() -- :CortexDebugRTOS
 ---
 --- Only Neovim/libuv APIs are used; nvim-dap is required lazily and only for
 --- the adapter registration and symbol resolution.
@@ -53,6 +54,23 @@ local defaults = {
     port = 4444,
     timeout_ms = 1000,
     read_all = false, -- otherwise refresh only expanded peripherals
+  },
+
+  -- FreeRTOS task browser. It uses stopped DAP/GDB evaluations and never
+  -- joins the live-watch polling path.
+  rtos = {
+    enabled = false,
+    auto_open = false,
+    auto_refresh_on_stop = false,
+    max_tasks = 128,
+    max_priorities = nil,
+    tcb_type = 'TCB_t',
+    list_item_type = 'ListItem_t',
+    stack_growth = -1,
+    stack_word_bytes = 4,
+    symbols = {},
+    fields = {},
+    window = nil,
   },
 
   live_watch = {
@@ -704,6 +722,12 @@ end
 
 function M._is_stopped()
   return stopped_session() ~= nil
+end
+
+-- Exposed to stopped-only auxiliary views without making them depend on
+-- nvim-dap internals or the live-watch implementation.
+function M._stopped_session()
+  return stopped_session()
 end
 
 --- Cancel outstanding stopped-state metadata requests. Keep existing hydrated
@@ -1655,11 +1679,14 @@ end
 ----------------------------------------------------------------------------
 
 local peripheral = require('cortex.peripheral')
+local rtos = require('cortex.rtos')
 M._peripheral = peripheral -- exposed for tests/statusline integrations
+M._rtos = rtos -- exposed for tests/statusline integrations
 
 local function on_session_start(config)
   invalidate_hydration()
   peripheral.on_session_start(config)
+  rtos.on_session_start(config)
   -- Never carry addresses or variable handles across debug sessions.
   for _, e in ipairs(watch.entries) do
     -- Do not display a raw command/address value from the previous target
@@ -1695,6 +1722,7 @@ end
 local function on_session_end()
   invalidate_hydration()
   peripheral.on_session_end()
+  rtos.on_session_end()
   watch.session_config = nil
   for _, e in ipairs(watch.entries) do
     if e.kind == 'symbol' then
@@ -1720,12 +1748,14 @@ local function register_listeners(dap)
   end
   dap.listeners.after.event_continued[key] = function()
     peripheral.on_session_continued()
+    rtos.on_session_continued()
     -- Do not let an in-flight stopped-state hydration chain issue more DAP
     -- requests after resume. Existing address plans remain telnet-only.
     invalidate_hydration()
   end
   dap.listeners.after.event_stopped[key] = function()
     peripheral.on_session_stopped()
+    rtos.on_session_stopped()
     -- A stopped event is the only point at which C-expression metadata is
     -- hydrated. Running samples below never issue evaluate/variables calls.
     for _, e in ipairs(watch.entries) do
@@ -1843,6 +1873,25 @@ function M.peripheral_load(config)
   return peripheral.load(config)
 end
 
+function M.rtos_open()
+  return rtos.open()
+end
+
+function M.rtos_close()
+  return rtos.close()
+end
+
+function M.rtos_toggle()
+  return rtos.toggle()
+end
+
+function M.rtos_refresh(callback)
+  return rtos.refresh(callback)
+end
+
+M.open_rtos = M.rtos_open
+M.refresh_rtos = M.rtos_refresh
+
 M.open_peripheral = M.peripheral_open
 M.refresh_peripheral = M.peripheral_refresh
 
@@ -1867,6 +1916,15 @@ function M._create_commands()
   if vim.fn.exists(':CortexDebugPeripheralRefresh') ~= 2 then cmd('CortexDebugPeripheralRefresh', function()
     M.peripheral_refresh()
   end, { desc = 'Refresh SVD peripheral registers (stopped only)' }) end
+  if vim.fn.exists(':CortexDebugRTOS') ~= 2 then cmd('CortexDebugRTOS', function()
+    M.rtos_toggle()
+  end, { desc = 'Toggle the stopped-only FreeRTOS task browser' }) end
+  if vim.fn.exists(':CortexDebugRTOSRefresh') ~= 2 then cmd('CortexDebugRTOSRefresh', function()
+    M.rtos_refresh()
+  end, { desc = 'Refresh FreeRTOS tasks (stopped only)' }) end
+  if vim.fn.exists(':CortexFreeRTOS') ~= 2 then cmd('CortexFreeRTOS', function()
+    M.rtos_toggle()
+  end, { desc = 'Toggle the stopped-only FreeRTOS task browser' }) end
 end
 
 ----------------------------------------------------------------------------
@@ -1877,6 +1935,7 @@ end
 function M.setup(opts)
   M.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts or {})
   peripheral.setup(M)
+  rtos.setup(M)
 
   local dap = get_dap()
   if not dap then

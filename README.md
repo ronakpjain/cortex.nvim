@@ -9,6 +9,8 @@ A self-contained ARM Cortex-M debugging plugin for Neovim.
   client that samples memory/symbols while the target is *running*.
 * **Stopped-only SVD peripheral browser** (`lua/cortex/peripheral.lua`) — a
   separate read-only register/bitfield tree using its own telnet client.
+* **Stopped-only FreeRTOS task browser** (`lua/cortex/rtos.lua`) — walks
+  FreeRTOS kernel task lists through stopped GDB expressions.
 * **No external dependencies**: no Python, no Node, no VSCode extension, no
   third-party Lua rocks. Only Neovim + libuv APIs.
 
@@ -55,6 +57,19 @@ require('cortex').setup({
     port = 4444,
     timeout_ms = 1000,
     read_all = false,          -- refresh only expanded peripherals by default
+  },
+
+  rtos = {
+    enabled = false,
+    auto_open = false,
+    auto_refresh_on_stop = false,
+    max_tasks = 128,
+    max_priorities = nil, -- probe from the ELF; fallback is 32
+    tcb_type = 'TCB_t',
+    list_item_type = 'ListItem_t',
+    -- Override symbols/fields when a kernel or port renames them.
+    symbols = {},
+    fields = {},
   },
 
   live_watch = {
@@ -137,6 +152,7 @@ Standard nvim-dap / `.vscode/launch.json` format — nvim-dap picks up
 | `env` | – | extra environment for gdb/OpenOCD |
 | `liveWatch` | – | `{ enabled, samplesPerSecond, telnetPort }`, used by the plugin only |
 | `svdFile` / `svdPath` | – | CMSIS-SVD path for the stopped-only peripheral browser |
+| `rtos` | – | `{ enabled, autoOpen, autoRefreshOnStop }` for the FreeRTOS task browser |
 
 `${workspaceFolder}`, `${workspaceRoot}`, `${cwd}`, `${userHome}`, `${file}`,
 `${fileDirname}`, `${fileBasename}`, `${fileBasenameNoExtension}` and
@@ -153,10 +169,36 @@ Events: `initialized`, `stopped`, `continued`, `thread`, `breakpoint`,
 `output`, `terminated`, `exited` — enough for `nvim-dap-ui` to populate its
 threads / stacks / scopes / watches / repl panes.
 
-Out of scope (by design): pre/postLaunchTask, RTOS views, semihosting UIs,
-disassembly.
+Out of scope (by design): pre/postLaunchTask, semihosting UIs, disassembly.
 
-## Three value views
+## FreeRTOS task view
+
+Enable it in a launch configuration or open it manually:
+
+```jsonc
+"rtos": {
+  "enabled": true,
+  "autoOpen": true,
+  "autoRefreshOnStop": false
+}
+```
+
+Commands:
+
+| command | action |
+| --- | --- |
+| `:CortexDebugRTOS` | toggle the stopped-only task view |
+| `:CortexDebugRTOSRefresh` | walk and refresh task data while stopped |
+| `:CortexFreeRTOS` | alias for `:CortexDebugRTOS` |
+
+The view reads `TCB_t`/`List_t` data through GDB and walks ready, blocked,
+pending, suspended, and termination lists. It displays the task name, state,
+priority, runtime counter, stack estimate, and TCB address. Missing optional
+kernel symbols are skipped; `rtos.symbols`, `rtos.fields`, `maxTasks`, and
+`maxPriorities` can override firmware-specific names and limits. It never
+polls while running and never shares the Live Watch or SVD connections.
+
+## Four value views
 
 These views are intentionally separate:
 
@@ -166,6 +208,9 @@ These views are intentionally separate:
   register → bitfield rows from the SVD and reads register memory only after
   `:CortexDebugPeripheralRefresh` (or `r`) while the target is stopped. It
   decodes register width/endianness, masks, and enumerated field names.
+* **FreeRTOS tasks** are shown by `:CortexDebugRTOS`. The view is a separate
+  stopped-only GDB task-list walk; it is not merged into DAP threads, SVD
+  values, or Live Watch polling.
 * **Live Watch** is the native `:CortexDebugWatch` window. It uses its own
   polling socket for memory/symbol samples while running; SVD values are never
   merged into that queue or window.
