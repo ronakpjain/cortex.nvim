@@ -27,6 +27,10 @@ echo "== unit tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_adapter.lua"
 
 echo
+echo "== live-watch hydration tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_live_watch.lua"
+
+echo
 echo "== end-to-end tests (launch + openocd) =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_e2e.lua"
 

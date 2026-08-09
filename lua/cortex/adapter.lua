@@ -2167,7 +2167,21 @@ function Adapter:_varobj_children(handle)
       local varobj = tostring(child.name or '')
       local display = tostring(child.exp or varobj)
       local numchild = as_int(child.numchild, 0)
-      local expression = string.format('%s.%s', handle.expression or '', display)
+      local parent_expression = handle.expression or ''
+      local expression
+      if display:sub(1, 1) == '[' then
+        expression = parent_expression .. display
+      elseif display:match('^%d+$') then
+        expression = parent_expression .. '[' .. display .. ']'
+      elseif display:sub(1, 1) == '*' then
+        expression = display
+      else
+        local base = parent_expression
+        if base:sub(1, 1) == '*' and base:sub(-1) ~= ')' then
+          base = '(' .. base .. ')'
+        end
+        expression = string.format('%s.%s', base, display)
+      end
       local entry = {
         name = display,
         value = tostring(child.value or ''),

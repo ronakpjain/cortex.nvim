@@ -21,7 +21,7 @@ nvim --headless --clean -u NONE -l <plugin>/lua/cortex/adapter_main.lua
 ```lua
 vim.pack.add({
   {
-    src = 'file:///Users/ronak/coding/projects/cortex.nvim',
+    src = 'gh:ronakpjain/cortex.nvim',
     name = 'cortex.nvim',
   },
 }, { confirm = false, load = true })
@@ -31,9 +31,7 @@ require('cortex').setup({})
 
 Add the `vim.pack` entry after `nvim-dap` is installed. `setup()` registers
 `dap.adapters['cortex-debug']` using the *current* Neovim executable
-(`vim.v.progpath`) plus the bundled Lua entry script. The repository path above
-is intentionally a local `file://` source for this checkout; replace it with
-the plugin's Git URL once you publish it.
+(`vim.v.progpath`) plus the bundled Lua entry script. The repository is also available at `https://github.com/ronakpjain/cortex.nvim`.
 
 ## Configuration
 
@@ -53,6 +51,8 @@ require('cortex').setup({
     host = '127.0.0.1',
     port = 4444,               -- OpenOCD telnet port
     timeout_ms = 1000,
+    max_depth = 4,             -- recursive struct/array expansion
+    max_children = 32,
     expressions = {},          -- always-present watch expressions
   },
 
@@ -159,9 +159,14 @@ Inside the window: `a` add, `d` delete under cursor, `c` clear, `r` refresh,
 `q` close.
 
 Entries can be a raw address (`0x20000010`), an OpenOCD command (`reg`,
-`mdw 0x20000000 4`, `targets`, …) or a C symbol. Symbols are resolved through
-the active nvim-dap session (`&(expr)` / `sizeof(expr)`) while the target is
-halted, then sampled over telnet while it runs.
+`mdw 0x20000000 4`, `targets`, …) or a C expression (`gpio_config`,
+`gpio_config[0].pin`, `my_struct.field`, and so on). C expressions are
+resolved through the active nvim-dap/GDB session (`&(expr)` / `sizeof(expr)`)
+while the target is halted. Their debug-info children are expanded recursively
+for structs and arrays, including pointer values and optional dereferenced
+children. The resulting address/type plan is then sampled from OpenOCD telnet
+while the target runs; running samples never issue DAP/GDB requests. Add or
+refresh a new C expression while stopped, or stop once to hydrate it.
 
 Lua API: `require('cortex').start/stop/toggle/add/clear/refresh/telnet/status`.
 

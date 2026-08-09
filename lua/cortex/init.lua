@@ -57,6 +57,9 @@ local defaults = {
     port = 4444,
     -- Per request timeout (ms) for the telnet round trip.
     timeout_ms = 1000,
+    -- Bounds for recursive C-expression metadata hydration.
+    max_depth = 4,
+    max_children = 32,
     -- Watch expressions that are always present.
     expressions = {}, ---@type string[]
   },
@@ -192,6 +195,7 @@ function Telnet.new(host, port, timeout_ms)
     connected = false,
     connecting = false,
     closed = false,
+    connect_generation = 0,
     last_error = nil,
   }, Telnet)
 end
@@ -225,8 +229,13 @@ function Telnet:connect(cb)
   self.connecting = true
   self.closed = false
   self.last_error = nil
+  self.connect_generation = self.connect_generation + 1
+  local generation = self.connect_generation
 
   local function do_connect(ip)
+    if self.closed or self.connect_generation ~= generation then
+      return
+    end
     local tcp = uv.new_tcp()
     if not tcp then
       self.connecting = false
@@ -235,6 +244,14 @@ function Telnet:connect(cb)
     end
     self.handle = tcp
     uv.tcp_connect(tcp, ip, self.port, function(err)
+      if self.closed or self.connect_generation ~= generation then
+        pcall(function()
+          if not tcp:is_closing() then
+            tcp:close()
+          end
+        end)
+        return
+      end
       if err then
         self.connecting = false
         self.connected = false
@@ -244,7 +261,9 @@ function Telnet:connect(cb)
         self.handle = nil
         self.last_error = err
         vim.schedule(function()
-          cb(err)
+          if not self.closed and self.connect_generation == generation then
+            cb(err)
+          end
         end)
         return
       end
@@ -255,20 +274,26 @@ function Telnet:connect(cb)
       tcp:read_start(function(rerr, chunk)
         if rerr then
           vim.schedule(function()
-            self:_fail(rerr)
-            self:close()
+            if not self.closed and self.connect_generation == generation then
+              self:_fail(rerr)
+              self:close()
+            end
           end)
           return
         end
         if not chunk then -- EOF
           vim.schedule(function()
-            self:_fail('connection closed by OpenOCD')
-            self:close()
+            if not self.closed and self.connect_generation == generation then
+              self:_fail('connection closed by OpenOCD')
+              self:close()
+            end
           end)
           return
         end
         vim.schedule(function()
-          self:_on_data(chunk)
+          if not self.closed and self.connect_generation == generation then
+            self:_on_data(chunk)
+          end
         end)
       end)
       -- If the banner never shows up, unblock the queue anyway.
@@ -280,7 +305,7 @@ function Telnet:connect(cb)
           t:close()
           self.banner_timer = nil
           vim.schedule(function()
-            if not self.ready then
+            if not self.closed and self.connect_generation == generation and not self.ready then
               self.ready = true
               self:_pump()
             end
@@ -288,7 +313,9 @@ function Telnet:connect(cb)
         end)
       end
       vim.schedule(function()
-        cb(nil)
+        if not self.closed and self.connect_generation == generation then
+          cb(nil)
+        end
       end)
     end)
   end
@@ -300,13 +327,17 @@ function Telnet:connect(cb)
       if err or not res or not res[1] then
         self.connecting = false
         vim.schedule(function()
-          cb(err or ('cannot resolve host ' .. self.host))
+          if not self.closed and self.connect_generation == generation then
+            cb(err or ('cannot resolve host ' .. self.host))
+          end
         end)
         return
       end
       local addr = res[1].addr
       vim.schedule(function()
-        do_connect(addr)
+        if not self.closed and self.connect_generation == generation then
+          do_connect(addr)
+        end
       end)
     end)
   end
@@ -314,6 +345,7 @@ end
 
 function Telnet:close()
   self.closed = true
+  self.connect_generation = self.connect_generation + 1
   self.connected = false
   self.connecting = false
   self.ready = false
@@ -357,7 +389,9 @@ end
 ---@param cmd string
 ---@return string
 local function clean_response(body, cmd)
-  body = body:gsub('\r', '')
+  -- Some OpenOCD builds prefix telnet replies with a NUL after negotiation.
+  -- It is protocol noise, not part of the memory/register value.
+  body = body:gsub('%z', ''):gsub('\r', '')
   body = body:gsub('^[%s]*> ?', '')
   local lines = vim.split(body, '\n', { plain = true })
   -- OpenOCD echoes back what we typed; drop the first line if it is the echo.
@@ -597,60 +631,245 @@ local function first_hex(s)
   return nil
 end
 
---- Resolve `&(expr)` / `sizeof(expr)` through the (stopped) DAP session.
----@param entry cortex.Entry
----@param cb fun(err: string|nil)
-local function resolve_entry(entry, cb)
+--- Whether the active DAP session has a usable stopped frame.
+local function stopped_session()
   local session = active_session()
-  if not session then
-    cb('no active debug session')
+  if not session or not session.stopped_thread_id or not session.current_frame then
+    return nil
+  end
+  return session
+end
+
+--- Cancel outstanding stopped-state metadata requests. Keep existing hydrated
+--- nodes intact when merely resuming; they remain valid telnet poll plans.
+local function invalidate_hydration()
+  local state = M._watch
+  if not state then
     return
   end
-  if not session.stopped_thread_id or not session.current_frame then
+  state.generation = (state.generation or 0) + 1
+  for _, entry in ipairs(state.entries or {}) do
+    if entry.kind == 'symbol' then
+      entry.hydration_id = (entry.hydration_id or 0) + 1
+      entry.resolving = false
+    end
+  end
+end
+
+local function dap_error(err, fallback)
+  if err then
+    return err.message or tostring(err)
+  end
+  return fallback
+end
+
+local function response_value(resp, key)
+  return resp and resp[key]
+end
+
+--- Build a child C expression from the name supplied by a DAP variables reply.
+local function child_expression(parent, variable)
+  local name = vim.trim(tostring(variable.name or ''))
+  local evaluate_name = vim.trim(tostring(variable.evaluateName or ''))
+  if evaluate_name ~= '' then
+    -- Older adapter versions emitted `array.[0]`; normalize that spelling
+    -- before asking GDB to evaluate the child again. Also parenthesize fields
+    -- below a dereference (`(*ptr).field`, not `*ptr.field`).
+    local normalized = evaluate_name:gsub('%.%[', '['):gsub('%.(%d+)', '[%1]')
+    if parent:sub(1, 1) == '*' and normalized:sub(1, #parent) == parent then
+      normalized = '(' .. parent .. ')' .. normalized:sub(#parent + 1)
+    end
+    return normalized
+  end
+  if name:sub(1, 1) == '[' or name:sub(1, 1) == '.' then
+    return parent .. name
+  end
+  if name:sub(1, 1) == '*' then
+    return name
+  end
+  local base = parent
+  if base:sub(1, 1) == '*' and base:sub(-1) ~= ')' then
+    base = '(' .. base .. ')'
+  end
+  return base .. '.' .. name
+end
+
+local function configured_limits()
+  local lw = M.config.live_watch
+  local config_lw = tbl_get(M._watch and M._watch.session_config, 'liveWatch')
+  local depth = tonumber(tbl_get(config_lw, 'maxDepth') or tbl_get(config_lw, 'max_depth') or lw.max_depth) or 4
+  local children = tonumber(tbl_get(config_lw, 'maxChildren') or tbl_get(config_lw, 'max_children') or lw.max_children) or 32
+  return math.max(1, math.min(8, math.floor(depth))), math.max(1, math.min(256, math.floor(children)))
+end
+
+--- Resolve one node's value, address, size and type while stopped. The value
+--- itself is deliberately not retained for running samples: OpenOCD supplies
+--- those from memory after this metadata pass.
+local function hydrate_node(session, frame_id, node, max_depth, max_children, done, valid)
+  if not valid() then
+    done('hydration cancelled')
+    return
+  end
+  session:evaluate({
+    expression = node.expression,
+    context = 'watch',
+    frameId = frame_id,
+  }, function(err, resp)
+    if not valid() then
+      done('hydration cancelled')
+      return
+    end
+    if err or not resp then
+      done(dap_error(err, 'cannot evaluate `' .. node.expression .. '`'))
+      return
+    end
+    node.type = response_value(resp, 'type') or node.type
+    -- Re-evaluation is authoritative. A positive variablesReference from a
+    -- parent variables reply must not make a primitive child look composite.
+    node.variables_reference = tonumber(response_value(resp, 'variablesReference')) or 0
+    session:evaluate({
+      expression = '&(' .. node.expression .. ')',
+      context = 'watch',
+      frameId = frame_id,
+    }, function(aerr, aresp)
+      if not valid() then
+        done('hydration cancelled')
+        return
+      end
+      local address = not aerr and aresp and (first_hex(aresp.memoryReference) or first_hex(aresp.result))
+      if not address then
+        done(dap_error(aerr, 'cannot resolve address of `' .. node.expression .. '`'))
+        return
+      end
+      node.address = address
+      session:evaluate({
+        expression = 'sizeof(' .. node.expression .. ')',
+        context = 'watch',
+        frameId = frame_id,
+      }, function(serr, sresp)
+        if not valid() then
+          done('hydration cancelled')
+          return
+        end
+        local size = not serr and sresp and first_hex(sresp.result)
+        if not size or size < 1 then
+          done(dap_error(serr, 'cannot resolve size of `' .. node.expression .. '`'))
+          return
+        end
+        node.size = size
+        node.command = nil
+        node.children = {}
+        local pointer = tostring(node.type or ''):match('%*') ~= nil
+        -- A pointer has a scalar value in its own storage and may also expose
+        -- a dereferenced child through GDB's varobj. Poll the pointer itself
+        -- over telnet, then hydrate the optional pointee below it.
+        if node.variables_reference <= 0 or pointer then
+          local command, count = md_for_size(size)
+          node.command = string.format('%s 0x%08x %d', command, address, count)
+        end
+        if node.variables_reference <= 0 then
+          done(nil)
+          return
+        end
+        if node.depth >= max_depth then
+          node.truncated = true
+          done(nil)
+          return
+        end
+        session:request('variables', {
+          variablesReference = node.variables_reference,
+        }, function(verr, vresp)
+          if not valid() then
+            done('hydration cancelled')
+            return
+          end
+          if verr or not vresp then
+            done(dap_error(verr, 'cannot fetch children of `' .. node.expression .. '`'))
+            return
+          end
+          local variables = vresp.variables or (vim.islist(vresp) and vresp) or {}
+          local count = math.min(#variables, max_children)
+          node.truncated = #variables > count
+          local index = 0
+          local function next_child(child_err)
+            if child_err then
+              done(child_err)
+              return
+            end
+            index = index + 1
+            if index > count then
+              done(nil)
+              return
+            end
+            local variable = variables[index]
+            local child = {
+              name = tostring(variable.name or ('[' .. (index - 1) .. ']')),
+              expression = child_expression(node.expression, variable),
+              depth = node.depth + 1,
+              type = variable.type,
+              value = nil,
+              error = nil,
+              variables_reference = tonumber(variable.variablesReference) or 0,
+              children = {},
+            }
+            node.children[#node.children + 1] = child
+            hydrate_node(session, frame_id, child, max_depth, max_children, next_child, valid)
+          end
+          next_child(nil)
+        end)
+      end)
+    end)
+  end)
+end
+
+--- Hydrate a complete root expression. This is only called from stopped
+--- events/manual refreshes, never from the running telnet sample loop.
+local function hydrate_entry(entry, cb)
+  local session = stopped_session()
+  if not session then
     cb('target must be stopped to resolve `' .. entry.raw .. '`')
     return
   end
   local frame_id = session.current_frame.id
   entry.resolving = true
-
-  local function finish(err)
-    entry.resolving = false
-    cb(err)
+  entry.hydration_id = (entry.hydration_id or 0) + 1
+  local hydration_id = entry.hydration_id
+  local generation = M._watch and M._watch.generation or 0
+  local function valid()
+    return entry.hydration_id == hydration_id
+      and M._watch
+      and M._watch.generation == generation
+      and active_session() == session
+      and stopped_session() == session
   end
-
-  session:evaluate({
-    expression = '&(' .. entry.raw .. ')',
-    context = 'watch',
-    frameId = frame_id,
-  }, function(err, resp)
-    if err or not resp then
-      finish((err and (err.message or tostring(err))) or 'cannot take address of ' .. entry.raw)
+  entry.error = nil
+  local max_depth, max_children = configured_limits()
+  local root = {
+    name = entry.raw,
+    expression = entry.raw,
+    depth = 0,
+    value = nil,
+    error = nil,
+    children = {},
+  }
+  hydrate_node(session, frame_id, root, max_depth, max_children, function(err)
+    if entry.hydration_id ~= hydration_id or not valid() then
       return
     end
-    local addr = first_hex(resp.memoryReference) or first_hex(resp.result)
-    if not addr then
-      finish('cannot parse address from `' .. tostring(resp.result) .. '`')
-      return
+    entry.resolving = false
+    if err then
+      entry.error = err
+      return cb(err)
     end
-    entry.address = addr
-    session:evaluate({
-      expression = 'sizeof(' .. entry.raw .. ')',
-      context = 'watch',
-      frameId = frame_id,
-    }, function(serr, sresp)
-      local size = 4
-      if not serr and sresp then
-        size = first_hex(sresp.result) or 4
-      end
-      if size < 1 then
-        size = 4
-      end
-      entry.size = size
-      local cmd, count = md_for_size(size)
-      entry.command = string.format('%s 0x%08x %d', cmd, addr, count)
-      finish(nil)
-    end)
-  end)
+    -- Commit only a complete tree from the current stopped session. Existing
+    -- metadata remains available for telnet polling if the target resumes.
+    entry.root = root
+    entry.address, entry.size, entry.type = root.address, root.size, root.type
+    entry.variables_reference = root.variables_reference
+    entry.command = root.command
+    entry.error = nil
+    cb(nil)
+  end, valid)
 end
 
 ----------------------------------------------------------------------------
@@ -700,6 +919,49 @@ local function format_value(entry, response)
   return table.concat(parts, ' ')
 end
 
+--- Decode an OpenOCD mdX response using the metadata captured while stopped.
+local function decode_scalar(node, response)
+  local words = {}
+  for _, line in ipairs(vim.split(response or '', '\n', { plain = true })) do
+    local _, rhs = line:match('^%s*(0[xX]%x+):%s*(.+)$')
+    if rhs then
+      for token in rhs:gmatch('%S+') do
+        token = token:gsub('^0[xX]', ''):gsub('[^%x].*$', '')
+        if token ~= '' and token:match('^%x+$') then
+          words[#words + 1] = token
+        end
+      end
+    end
+  end
+  if #words == 0 then
+    return vim.trim(response or '')
+  end
+  local size = math.max(1, tonumber(node.size) or 4)
+  local type_name = tostring(node.type or '')
+  if size <= 4 then
+    local number = tonumber(words[1], 16) or 0
+    local bits = size * 8
+    local modulus = 2 ^ bits
+    number = number % modulus
+    local bool = type_name:match('[Bb]ool')
+    if bool then
+      return number ~= 0 and 'true' or 'false'
+    end
+    local signed = not type_name:match('unsigned') and not type_name:match('uint%d')
+      and not type_name:match('%*') and not type_name:match('^[uU]')
+    local shown = number
+    if signed and number >= 2 ^ (bits - 1) then
+      shown = number - modulus
+    end
+    return string.format('0x%0' .. (size * 2) .. 'x  %d', number, shown)
+  end
+  local parts = {}
+  for i = 1, math.min(#words, math.ceil(size / 4)) do
+    parts[i] = '0x' .. words[i]
+  end
+  return table.concat(parts, ' ')
+end
+
 ----------------------------------------------------------------------------
 -- Live watch state
 ----------------------------------------------------------------------------
@@ -718,6 +980,9 @@ local watch = {
   last_connect_attempt = 0,
   render_scheduled = false,
   session_config = nil, ---@type table|nil
+  -- Invalidates in-flight DAP metadata hydration when sessions change or
+  -- resume. Running samples must never continue an old DAP request chain.
+  generation = 0,
 }
 
 M._watch = watch -- exposed for debugging
@@ -873,30 +1138,67 @@ local function render()
   for _, e in ipairs(watch.entries) do
     width = math.max(width, #e.raw)
   end
-  width = math.min(width, 32)
+  width = math.max(1, math.min(width, 32))
 
   local line_of = {}
-  for _, e in ipairs(watch.entries) do
-    local label = e.raw
-    if #label > width then
-      label = label:sub(1, width)
-    end
+  local function add_row(entry, node, indent, root)
+    local label = root and entry.raw or (node.name or node.expression)
     local text
-    if e.error then
-      text = '<' .. e.error .. '>'
-    elseif e.resolving then
+    if (root and entry.error) or (not root and node.error) then
+      text = '<unresolved: ' .. tostring(root and entry.error or node.error) .. '>'
+    elseif root and entry.resolving then
       text = '<resolving...>'
-    elseif e.value == nil then
-      text = '<pending>'
+    elseif node.value ~= nil then
+      text = node.value
+    elseif node.children and #node.children > 0 then
+      text = '{' .. tostring(node.type or 'object') .. '}'
+      if node.truncated then
+        text = text .. ' ...'
+      end
+    elseif node.type then
+      text = '<' .. node.type .. '>'
     else
-      text = e.value
+      text = root and '<pending>' or '<unresolved>'
     end
-    local value_lines = vim.split(text, '\n', { plain = true })
-    lines[#lines + 1] = string.format('%-' .. width .. 's  %s', label, value_lines[1] or '')
-    line_of[#lines] = e
+    local value_lines = vim.split(tostring(text), '\n', { plain = true })
+    local prefix = string.rep('  ', indent)
+    if root then
+      label = label:sub(1, width)
+      lines[#lines + 1] = prefix .. string.format('%-' .. width .. 's  %s', label, value_lines[1] or '')
+    else
+      lines[#lines + 1] = prefix .. label .. '  ' .. (value_lines[1] or '')
+    end
+    line_of[#lines] = entry
     for i = 2, #value_lines do
-      lines[#lines + 1] = string.rep(' ', width + 2) .. value_lines[i]
+      lines[#lines + 1] = string.rep(' ', #prefix + (root and width + 2 or #label + 2)) .. value_lines[i]
+      line_of[#lines] = entry
+    end
+    for _, child in ipairs(node.children or {}) do
+      add_row(entry, child, indent + 1, false)
+    end
+  end
+
+  for _, e in ipairs(watch.entries) do
+    if e.kind == 'symbol' and e.root then
+      add_row(e, e.root, 0, true)
+    else
+      local text
+      if e.error then
+        text = '<unresolved: ' .. tostring(e.error) .. '>'
+      elseif e.resolving then
+        text = '<resolving...>'
+      elseif e.value == nil then
+        text = '<pending>'
+      else
+        text = e.value
+      end
+      local value_lines = vim.split(tostring(text), '\n', { plain = true })
+      lines[#lines + 1] = string.format('%-' .. width .. 's  %s', e.raw:sub(1, width), value_lines[1] or '')
       line_of[#lines] = e
+      for i = 2, #value_lines do
+        lines[#lines + 1] = string.rep(' ', width + 2) .. value_lines[i]
+        line_of[#lines] = e
+      end
     end
   end
   watch.line_map = line_of
@@ -926,21 +1228,53 @@ local function poll_once()
   if not tel or not tel:is_connected() then
     return
   end
+  local generation = watch.generation
+  local function current()
+    return watch.active and watch.telnet == tel and watch.generation == generation
+  end
   -- Do not pile up requests if the target/telnet link is slower than the
-  -- requested sample rate.
+  -- requested sample rate. This loop intentionally never calls DAP: all
+  -- symbol metadata must have been hydrated by a stopped event first.
   if tel:queue_size() > math.max(2, #watch.entries) then
     return
   end
-  for _, entry in ipairs(watch.entries) do
-    if entry.kind == 'symbol' and not entry.command and not entry.resolving then
-      local e = entry
-      resolve_entry(e, function(err)
-        e.error = err
+
+  local function poll_node(entry, node)
+    if node.command then
+      tel:send(node.command, function(err, response)
+        if not current() then
+          return
+        end
+        if err then
+          node.error = tostring(err)
+          if entry.root == node then
+            entry.error = node.error
+          end
+        else
+          node.error = nil
+          node.value = decode_scalar(node, response or '')
+          if entry.root == node then
+            entry.value = node.value
+            entry.error = nil
+          end
+        end
         schedule_render()
       end)
+    end
+    for _, child in ipairs(node.children or {}) do
+      poll_node(entry, child)
+    end
+  end
+
+  for _, entry in ipairs(watch.entries) do
+    if entry.kind == 'symbol' and entry.root and not entry.resolving then
+      poll_node(entry, entry.root)
     elseif entry.command then
       local e = entry
       tel:send(e.command, function(err, response)
+        if not current() then
+          return
+        end
         if err then
           e.error = tostring(err)
         else
@@ -1004,6 +1338,11 @@ function M._connect()
   watch.status = 'connecting'
   schedule_render()
   tel:connect(function(err)
+    -- A reconnect/stop can replace this socket before its async callback
+    -- arrives. Obsolete callbacks must not revive the old watch state.
+    if watch.telnet ~= tel or not watch.active then
+      return
+    end
     if err then
       watch.status = 'error: ' .. tostring(err)
       for _, e in ipairs(watch.entries) do
@@ -1110,10 +1449,14 @@ function M.add(expr)
     open_window()
   end
   if entry.kind == 'symbol' then
-    resolve_entry(entry, function(err)
-      entry.error = err
-      schedule_render()
-    end)
+    if stopped_session() then
+      hydrate_entry(entry, function(err)
+        entry.error = err
+        schedule_render()
+      end)
+    else
+      entry.error = 'target must be stopped to resolve `' .. entry.raw .. '`'
+    end
   end
   schedule_render()
 end
@@ -1146,11 +1489,24 @@ end
 
 ---Force resolve + poll right now.
 function M.refresh()
+  local stopped = stopped_session() ~= nil
   for _, e in ipairs(watch.entries) do
     if e.kind == 'symbol' then
-      e.command = nil
+      if stopped then
+        hydrate_entry(e, function(err)
+          e.error = err
+          schedule_render()
+        end)
+      elseif not e.root then
+        -- A new symbol has no address plan yet. Existing hydrated symbols
+        -- must keep their telnet commands when refresh is pressed while the
+        -- target is running.
+        e.error = 'target must be stopped to refresh metadata'
+      end
     end
   end
+  -- Raw commands and already-hydrated symbols can still be sampled while
+  -- running; metadata requests above are strictly stopped-only.
   poll_once()
   schedule_render()
 end
@@ -1233,6 +1589,19 @@ end
 ----------------------------------------------------------------------------
 
 local function on_session_start(config)
+  invalidate_hydration()
+  -- Never carry addresses or variable handles across debug sessions.
+  for _, e in ipairs(watch.entries) do
+    -- Do not display a raw command/address value from the previous target
+    -- while the new OpenOCD session is still connecting.
+    e.value = nil
+    e.error = nil
+    if e.kind == 'symbol' then
+      e.command, e.address, e.size, e.root = nil, nil, nil, nil
+      e.variables_reference = nil
+      e.resolving = false
+    end
+  end
   watch.session_config = config
   local host, port, rate = endpoint_from_config(config)
   watch.host, watch.port, watch.rate = host, port, rate
@@ -1254,13 +1623,19 @@ local function on_session_start(config)
 end
 
 local function on_session_end()
+  invalidate_hydration()
   watch.session_config = nil
   for _, e in ipairs(watch.entries) do
     if e.kind == 'symbol' then
       e.command = nil
       e.address = nil
+      e.size = nil
+      e.root = nil
+      e.variables_reference = nil
+      e.resolving = false
     end
     e.value = nil
+    e.error = nil
   end
   if watch.active then
     M.stop({ keep_window = true })
@@ -1272,6 +1647,11 @@ local function register_listeners(dap)
   dap.listeners.after.event_initialized[key] = function(session)
     on_session_start(session and session.config)
   end
+  dap.listeners.after.event_continued[key] = function()
+    -- Do not let an in-flight stopped-state hydration chain issue more DAP
+    -- requests after resume. Existing address plans remain telnet-only.
+    invalidate_hydration()
+  end
   dap.listeners.after.event_terminated[key] = function()
     on_session_end()
   end
@@ -1282,10 +1662,11 @@ local function register_listeners(dap)
     on_session_end()
   end
   dap.listeners.after.event_stopped[key] = function()
-    -- Symbols may only be resolved while the target is stopped.
+    -- A stopped event is the only point at which C-expression metadata is
+    -- hydrated. Running samples below never issue evaluate/variables calls.
     for _, e in ipairs(watch.entries) do
-      if e.kind == 'symbol' and not e.command and not e.resolving then
-        resolve_entry(e, function(err)
+      if e.kind == 'symbol' and not e.resolving then
+        hydrate_entry(e, function(err)
           e.error = err
           schedule_render()
         end)
