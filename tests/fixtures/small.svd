@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<device schemaVersion="1.1">
+  <vendor>Example &amp; Co</vendor>
+  <name>ExampleDevice</name>
+  <version>1.0</version>
+  <description><![CDATA[Example device for parser tests.]]></description>
+  <addressUnitBits>8</addressUnitBits>
+  <width>32</width>
+  <defaultRegisterProperties>
+    <size>0x20</size>
+    <access>read-write</access>
+    <resetValue>0x00000000</resetValue>
+  </defaultRegisterProperties>
+  <peripherals>
+    <peripheral>
+      <name>BASE</name>
+      <displayName>Base peripheral</displayName>
+      <baseAddress>0x40000000</baseAddress>
+      <registers>
+        <register>
+          <name>CTRL</name>
+          <addressOffset>0x0</addressOffset>
+          <fields>
+            <field>
+              <name>ENABLE</name><bitOffset>0</bitOffset><bitWidth>1</bitWidth>
+              <enumeratedValues><enumeratedValue><name>Disabled</name><value>0</value></enumeratedValue><enumeratedValue><name>Enabled</name><value>1</value></enumeratedValue></enumeratedValues>
+            </field>
+            <field><name>MODE</name><lsb>4</lsb><msb>6</msb></field>
+          </fields>
+        </register>
+        <register>
+          <name>DATA%s</name><dim>2</dim><dimIncrement>4</dimIncrement><dimIndex>0-1</dimIndex>
+          <addressOffset>0x10</addressOffset><access>read-only</access>
+        </register>
+      </registers>
+    </peripheral>
+    <peripheral derivedFrom="BASE">
+      <name>DERIVED</name><baseAddress>0x50000000</baseAddress>
+      <registers><register derivedFrom="CTRL"><name>STATUS</name><addressOffset>0x8</addressOffset></register></registers>
+    </peripheral>
+    <peripheral>
+      <name>CLUSTERED</name><baseAddress>0x60000000</baseAddress>
+      <registers>
+        <cluster>
+          <name>CH%s</name><dim>2</dim><dimIncrement>0x20</dimIncrement><dimIndex>A,B</dimIndex><addressOffset>0x0</addressOffset>
+          <registers><register><name>VALUE</name><addressOffset>0x4</addressOffset><size>16</size></register></registers>
+        </cluster>
+        <cluster><name>CLBASE</name><addressOffset>0x40</addressOffset>
+          <registers><register><name>VALUE2</name><addressOffset>0x4</addressOffset><size>16</size></register></registers>
+        </cluster>
+        <cluster derivedFrom="CLBASE"><name>CLDERIVED</name><addressOffset>0x60</addressOffset></cluster>
+      </registers>
+    </peripheral>
+  </peripherals>
+</device>

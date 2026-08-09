@@ -44,6 +44,17 @@ local defaults = {
   -- (only used by nvim-dap's legacy `load_launchjs`).
   filetypes = { 'c', 'cpp', 'rust', 'asm' },
 
+  -- CMSIS-SVD peripheral browser. Values are read only while stopped and
+  -- use a Telnet connection independent of live_watch.telnet.
+  peripheral = {
+    svdFile = nil,
+    svdPath = nil,
+    host = '127.0.0.1',
+    port = 4444,
+    timeout_ms = 1000,
+    read_all = false, -- otherwise refresh only expanded peripherals
+  },
+
   live_watch = {
     -- Open the watch window automatically when a session that has
     -- `liveWatch.enabled == true` in its configuration starts.
@@ -146,12 +157,16 @@ Telnet.__index = Telnet
 
 local IAC = 255
 
----Strip telnet IAC command sequences from a raw chunk.
+---Strip telnet IAC command sequences from a raw chunk. The returned tail is
+---an incomplete negotiation sequence that must be prepended to the next TCP
+---chunk; libuv is allowed to split any byte boundary.
 ---@param s string
----@return string
-local function strip_iac(s)
+---@param pending string|nil
+---@return string clean, string tail
+local function strip_iac(s, pending)
+  s = (pending or '') .. (s or '')
   if not s:find(string.char(IAC), 1, true) then
-    return s
+    return s, ''
   end
   local out, i, n = {}, 1, #s
   while i <= n do
@@ -159,16 +174,19 @@ local function strip_iac(s)
     if b == IAC then
       local cmd = s:byte(i + 1)
       if cmd == nil then
-        break
+        return table.concat(out), s:sub(i)
       elseif cmd == IAC then -- escaped 0xFF
         out[#out + 1] = string.char(IAC)
         i = i + 2
       elseif cmd >= 251 and cmd <= 254 then -- WILL/WONT/DO/DONT <opt>
+        if i + 2 > n then return table.concat(out), s:sub(i) end
         i = i + 3
       elseif cmd == 250 then -- SB ... IAC SE
         local j = s:find(string.char(IAC, 240), i + 2, true)
-        i = j and (j + 2) or (n + 1)
+        if not j then return table.concat(out), s:sub(i) end
+        i = j + 2
       else
+        if i + 1 > n then return table.concat(out), s:sub(i) end
         i = i + 2
       end
     else
@@ -176,7 +194,7 @@ local function strip_iac(s)
       i = i + 1
     end
   end
-  return table.concat(out)
+  return table.concat(out), ''
 end
 
 ---@param host string
@@ -196,6 +214,7 @@ function Telnet.new(host, port, timeout_ms)
     connecting = false,
     closed = false,
     connect_generation = 0,
+    iac_pending = '',
     last_error = nil,
   }, Telnet)
 end
@@ -349,6 +368,7 @@ function Telnet:close()
   self.connected = false
   self.connecting = false
   self.ready = false
+  self.iac_pending = ''
   self:_cancel_timeout()
   if self.banner_timer then
     pcall(function()
@@ -408,7 +428,7 @@ local function clean_response(body, cmd)
 end
 
 function Telnet:_on_data(chunk)
-  chunk = strip_iac(chunk)
+  chunk, self.iac_pending = strip_iac(chunk, self.iac_pending)
   if not self.pending then
     -- Connection banner (or unsolicited output): swallow it, but use it as the
     -- "server is ready" signal.
@@ -507,6 +527,48 @@ function Telnet:queue_size()
 end
 
 M._Telnet = Telnet -- exported for tests/debugging
+
+-- Explicit seams used by the stopped-only peripheral browser.  Keeping these
+-- here makes it impossible for that browser to accidentally use watch.telnet.
+function M._peripheral_config(config)
+  return config or (M._watch and M._watch.session_config)
+end
+
+function M._peripheral_endpoint(config)
+  config = M._peripheral_config(config)
+  local pcfg = tbl_get(M.config, 'peripheral') or {}
+  local host = tbl_get(config, 'telnetHost') or tbl_get(config, 'openocdTelnetHost')
+    or tbl_get(config, 'peripheralTelnetHost') or tbl_get(pcfg, 'host') or M.config.live_watch.host
+  local port = tbl_get(config, 'svdTelnetPort') or tbl_get(config, 'peripheralTelnetPort')
+    or tbl_get(config, 'telnetPort') or tbl_get(config, 'openocdTelnetPort')
+    or tbl_get(pcfg, 'port') or M.config.live_watch.port
+  return tostring(host), tonumber(port) or 4444
+end
+
+function M._new_peripheral_telnet(config)
+  config = M._peripheral_config(config)
+  local host, port = M._peripheral_endpoint(config)
+  local pcfg = tbl_get(M.config, 'peripheral') or {}
+  return Telnet.new(host, port, tonumber(pcfg.timeout_ms or pcfg.timeoutMs) or M.config.live_watch.timeout_ms)
+end
+
+--- One isolated stopped-only monitor request (does not touch watch.telnet).
+function M._peripheral_request(command, callback, config)
+  callback = callback or function() end
+  if not M._is_stopped() then
+    callback('target must be stopped', nil)
+    return nil, 'target must be stopped'
+  end
+  local tel = M._new_peripheral_telnet(config)
+  tel:connect(function(err)
+    if err then callback(err, nil); tel:close(); return end
+    tel:send(command, function(send_err, response)
+      callback(send_err, response)
+      tel:close()
+    end)
+  end)
+  return tel
+end
 
 ----------------------------------------------------------------------------
 -- Watch entries
@@ -638,6 +700,10 @@ local function stopped_session()
     return nil
   end
   return session
+end
+
+function M._is_stopped()
+  return stopped_session() ~= nil
 end
 
 --- Cancel outstanding stopped-state metadata requests. Keep existing hydrated
@@ -1588,8 +1654,12 @@ end
 -- nvim-dap wiring
 ----------------------------------------------------------------------------
 
+local peripheral = require('cortex.peripheral')
+M._peripheral = peripheral -- exposed for tests/statusline integrations
+
 local function on_session_start(config)
   invalidate_hydration()
+  peripheral.on_session_start(config)
   -- Never carry addresses or variable handles across debug sessions.
   for _, e in ipairs(watch.entries) do
     -- Do not display a raw command/address value from the previous target
@@ -1624,6 +1694,7 @@ end
 
 local function on_session_end()
   invalidate_hydration()
+  peripheral.on_session_end()
   watch.session_config = nil
   for _, e in ipairs(watch.entries) do
     if e.kind == 'symbol' then
@@ -1648,20 +1719,13 @@ local function register_listeners(dap)
     on_session_start(session and session.config)
   end
   dap.listeners.after.event_continued[key] = function()
+    peripheral.on_session_continued()
     -- Do not let an in-flight stopped-state hydration chain issue more DAP
     -- requests after resume. Existing address plans remain telnet-only.
     invalidate_hydration()
   end
-  dap.listeners.after.event_terminated[key] = function()
-    on_session_end()
-  end
-  dap.listeners.after.event_exited[key] = function()
-    on_session_end()
-  end
-  dap.listeners.after.disconnect[key] = function()
-    on_session_end()
-  end
   dap.listeners.after.event_stopped[key] = function()
+    peripheral.on_session_stopped()
     -- A stopped event is the only point at which C-expression metadata is
     -- hydrated. Running samples below never issue evaluate/variables calls.
     for _, e in ipairs(watch.entries) do
@@ -1672,6 +1736,15 @@ local function register_listeners(dap)
         end)
       end
     end
+  end
+  dap.listeners.after.event_terminated[key] = function()
+    on_session_end()
+  end
+  dap.listeners.after.event_exited[key] = function()
+    on_session_end()
+  end
+  dap.listeners.after.disconnect[key] = function()
+    on_session_end()
   end
 end
 
@@ -1750,24 +1823,50 @@ end
 -- Commands
 ----------------------------------------------------------------------------
 
+function M.peripheral_open()
+  return peripheral.open()
+end
+
+function M.peripheral_close()
+  return peripheral.close()
+end
+
+function M.peripheral_toggle()
+  return peripheral.toggle()
+end
+
+function M.peripheral_refresh(callback)
+  return peripheral.refresh(callback)
+end
+
+function M.peripheral_load(config)
+  return peripheral.load(config)
+end
+
+M.open_peripheral = M.peripheral_open
+M.refresh_peripheral = M.peripheral_refresh
+
 --- Create the user commands unless they already exist.
 function M._create_commands()
-  if vim.fn.exists(':CortexDebugWatch') == 2 then
-    return
-  end
   local cmd = api.nvim_create_user_command
-  cmd('CortexDebugWatch', function()
+  if vim.fn.exists(':CortexDebugWatch') ~= 2 then cmd('CortexDebugWatch', function()
     M.toggle()
-  end, { desc = 'Toggle the Cortex live watch window' })
-  cmd('CortexDebugWatchAdd', function(o)
+  end, { desc = 'Toggle the Cortex live watch window' }) end
+  if vim.fn.exists(':CortexDebugWatchAdd') ~= 2 then cmd('CortexDebugWatchAdd', function(o)
     M.add(o.args ~= '' and o.args or nil)
-  end, { nargs = '*', desc = 'Add a Cortex live watch expression' })
-  cmd('CortexDebugWatchClear', function()
+  end, { nargs = '*', desc = 'Add a Cortex live watch expression' }) end
+  if vim.fn.exists(':CortexDebugWatchClear') ~= 2 then cmd('CortexDebugWatchClear', function()
     M.clear()
-  end, { desc = 'Clear all Cortex live watch expressions' })
-  cmd('CortexDebugTelnet', function(o)
+  end, { desc = 'Clear all Cortex live watch expressions' }) end
+  if vim.fn.exists(':CortexDebugTelnet') ~= 2 then cmd('CortexDebugTelnet', function(o)
     M.telnet(o.args ~= '' and o.args or nil)
-  end, { nargs = '*', desc = 'Send a command to the OpenOCD telnet server' })
+  end, { nargs = '*', desc = 'Send a command to the OpenOCD telnet server' }) end
+  if vim.fn.exists(':CortexDebugPeripheral') ~= 2 then cmd('CortexDebugPeripheral', function()
+    M.peripheral_toggle()
+  end, { desc = 'Toggle the stopped-only Cortex SVD peripheral browser' }) end
+  if vim.fn.exists(':CortexDebugPeripheralRefresh') ~= 2 then cmd('CortexDebugPeripheralRefresh', function()
+    M.peripheral_refresh()
+  end, { desc = 'Refresh SVD peripheral registers (stopped only)' }) end
 end
 
 ----------------------------------------------------------------------------
@@ -1777,6 +1876,7 @@ end
 ---@param opts table|nil
 function M.setup(opts)
   M.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts or {})
+  peripheral.setup(M)
 
   local dap = get_dap()
   if not dap then

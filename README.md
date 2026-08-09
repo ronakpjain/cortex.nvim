@@ -7,6 +7,8 @@ A self-contained ARM Cortex-M debugging plugin for Neovim.
   framed DAP JSON on stdin/stdout.
 * **Native OpenOCD Live Watch** (`lua/cortex/init.lua`) — a libuv TCP telnet
   client that samples memory/symbols while the target is *running*.
+* **Stopped-only SVD peripheral browser** (`lua/cortex/peripheral.lua`) — a
+  separate read-only register/bitfield tree using its own telnet client.
 * **No external dependencies**: no Python, no Node, no VSCode extension, no
   third-party Lua rocks. Only Neovim + libuv APIs.
 
@@ -44,6 +46,16 @@ require('cortex').setup({
   adapter_args = {},
   adapter_name = 'cortex-debug',
   filetypes = { 'c', 'cpp', 'rust', 'asm' },
+
+  peripheral = {
+    -- Either may also be supplied by launch config as svdFile/svdPath.
+    svdFile = '${workspaceFolder}/support/svd/STM32G474.svd',
+    svdPath = nil,
+    host = '127.0.0.1',
+    port = 4444,
+    timeout_ms = 1000,
+    read_all = false,          -- refresh only expanded peripherals by default
+  },
 
   live_watch = {
     auto_open = true,          -- open when the session sets liveWatch.enabled
@@ -124,6 +136,7 @@ Standard nvim-dap / `.vscode/launch.json` format — nvim-dap picks up
 | `preAttachCommands` / `postAttachCommands` | – | same, for `attach` |
 | `env` | – | extra environment for gdb/OpenOCD |
 | `liveWatch` | – | `{ enabled, samplesPerSecond, telnetPort }`, used by the plugin only |
+| `svdFile` / `svdPath` | – | CMSIS-SVD path for the stopped-only peripheral browser |
 
 `${workspaceFolder}`, `${workspaceRoot}`, `${cwd}`, `${userHome}`, `${file}`,
 `${fileDirname}`, `${fileBasename}`, `${fileBasenameNoExtension}` and
@@ -140,8 +153,26 @@ Events: `initialized`, `stopped`, `continued`, `thread`, `breakpoint`,
 `output`, `terminated`, `exited` — enough for `nvim-dap-ui` to populate its
 threads / stacks / scopes / watches / repl panes.
 
-Out of scope (by design): pre/postLaunchTask, SVD parsing, peripheral register
-views, RTOS views, semihosting UIs, disassembly.
+Out of scope (by design): pre/postLaunchTask, RTOS views, semihosting UIs,
+disassembly.
+
+## Three value views
+
+These views are intentionally separate:
+
+* **DAP CPU registers/scopes** are the live nvim-dap/GDB register and scope
+  panes. They follow the selected stack frame and preserve normal DAP behavior.
+* **SVD peripheral view** is `:CortexDebugPeripheral`. It shows peripheral →
+  register → bitfield rows from the SVD and reads register memory only after
+  `:CortexDebugPeripheralRefresh` (or `r`) while the target is stopped. It
+  decodes register width/endianness, masks, and enumerated field names.
+* **Live Watch** is the native `:CortexDebugWatch` window. It uses its own
+  polling socket for memory/symbol samples while running; SVD values are never
+  merged into that queue or window.
+
+SVD paths expand `${workspaceFolder}`, `${workspaceRoot}`, and `${cwd}`.
+Launch configuration `svdFile` takes precedence over `svdPath`; setup options
+may provide either key as well.
 
 ## Live Watch
 

@@ -27,6 +27,14 @@ echo "== unit tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_adapter.lua"
 
 echo
+echo "== SVD parser tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_svd.lua"
+
+echo
+echo "== peripheral browser tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_peripheral.lua"
+
+echo
 echo "== live-watch hydration tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_live_watch.lua"
 
