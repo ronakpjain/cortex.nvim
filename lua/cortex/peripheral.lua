@@ -37,20 +37,58 @@ local function setting(name)
   return pcfg[name] or cfg[name]
 end
 
+local function any(tbl, keys)
+  for _, key in ipairs(keys) do
+    local value = get(tbl, key)
+    if value ~= nil then return value end
+  end
+end
+
+local function placeholder(value)
+  return type(value) == 'string' and value:match('^%${[^}]+}$') ~= nil
+end
+
+local function workspace_fallback()
+  local path = vim.fs.normalize(vim.fn.getcwd())
+  while path and path ~= '' do
+    if vim.fn.filereadable(path .. '/.vscode/launch.json') == 1
+        or vim.fn.isdirectory(path .. '/.git') == 1 then
+      return path
+    end
+    local parent = vim.fs.dirname(path)
+    if parent == path then break end
+    path = parent
+  end
+  return vim.fs.normalize(vim.fn.getcwd())
+end
+
+local function resolve_dir(value, fallback)
+  if type(value) ~= 'string' or vim.trim(value) == '' or placeholder(value) then return fallback end
+  value = vim.fn.expand(value)
+  if not value:match('^/') then value = fallback .. '/' .. value end
+  return vim.fs.normalize(value)
+end
+
 local function expand_path(path, config)
   if type(path) ~= 'string' or vim.trim(path) == '' then return nil end
   config = config or state.session_config or {}
-  local cwd = get(config, 'cwd') or vim.fn.getcwd()
-  local workspace = get(config, 'workspaceFolder') or cwd
+  local workspace_value = any(config, {
+    'workspaceRoot', 'workspaceroot', 'workspace_root',
+    'workspaceFolder', 'workspacefolder', 'workspace_folder', 'cwd',
+  })
+  local workspace = resolve_dir(workspace_value, workspace_fallback())
+  local cwd = resolve_dir(get(config, 'cwd'), workspace)
   local replacements = {
     workspaceFolder = workspace,
-    workspaceRoot = get(config, 'workspaceRoot') or workspace,
+    workspaceRoot = workspace,
+    workspaceroot = workspace,
+    workspacefolder = workspace,
     cwd = cwd,
     userHome = vim.env.HOME or vim.fn.expand('~'),
     pathSeparator = package.config:sub(1, 1),
   }
   path = path:gsub('%${([^}]+)}', function(key)
-    return tostring(replacements[key] or '${' .. key .. '}')
+    return tostring(replacements[key] or replacements[key:lower()] or '${' .. key .. '}')
   end)
   path = vim.fn.expand(path)
   if not path:match('^/') then path = cwd .. '/' .. path end

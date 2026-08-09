@@ -188,13 +188,18 @@ end
 ---@return table
 function M.build_variable_table(config, cwd)
   config = config or {}
-  local workspace = config.workspaceRoot or config.workspaceFolder or config.cwd or cwd or uv.cwd()
+  local workspace = config.workspaceRoot or config.workspaceroot
+    or config.workspaceFolder or config.workspacefolder
+    or config.cwd or cwd or uv.cwd()
   workspace = tostring(workspace)
   -- nvim-dap expands `${workspaceFolder}` but older versions (and some
-  -- launch.json files) still pass `${workspaceRoot}` through.  Treat either
-  -- placeholder as the Neovim working directory instead of making a literal
-  -- directory named `${workspaceRoot}`.
-  if workspace == '${workspaceRoot}' or workspace == '${workspaceFolder}' or workspace == '${cwd}' then
+  -- launch.json files) still pass workspace placeholders through. Treat the
+  -- canonical spellings and lowercase variants as the Neovim working
+  -- directory instead of making a literal directory named `${workspaceRoot}`.
+  local workspace_placeholder = workspace:lower()
+  if workspace_placeholder == '${workspaceroot}'
+      or workspace_placeholder == '${workspacefolder}'
+      or workspace_placeholder == '${cwd}' then
     workspace = cwd or uv.cwd()
   end
   workspace = normalize(expanduser(workspace))
@@ -204,6 +209,8 @@ function M.build_variable_table(config, cwd)
   local table_ = {
     workspaceRoot = workspace,
     workspaceFolder = workspace,
+    workspaceroot = workspace,
+    workspacefolder = workspace,
     cwd = workspace,
     userHome = os.getenv('HOME') or '',
     pathSeparator = '/',

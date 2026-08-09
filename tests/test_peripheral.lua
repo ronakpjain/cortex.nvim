@@ -30,6 +30,13 @@ local fake_core = {
 }
 peripheral.setup(fake_core)
 local path = root .. '/tests/fixtures/small.svd'
+local expanded_workspace_path = peripheral.resolve_path({
+  svdFile = '${workspaceroot}/tests/fixtures/small.svd',
+  workspaceRoot = root,
+  cwd = '${workspaceRoot}',
+})
+local absolute_path = vim.fs.normalize(vim.fn.fnamemodify(path, ':p'))
+check('workspaceRoot path expands', expanded_workspace_path == absolute_path, expanded_workspace_path)
 local model, err = peripheral.load({ svdFile = path, cwd = root })
 check('headless SVD load', model ~= nil, err)
 local base = model and model.peripherals_by_name.BASE

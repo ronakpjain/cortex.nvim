@@ -41,6 +41,10 @@ eq('as_list nil', A.as_list(nil), {})
 
 local vars = A.build_variable_table({ cwd = '/tmp/proj' })
 eq('vars workspaceRoot', vars.workspaceRoot, '/tmp/proj')
+local lower_vars = A.build_variable_table({ cwd = '${workspaceroot}' }, '/tmp/proj')
+eq('vars lowercase workspaceRoot', lower_vars.workspaceRoot, '/tmp/proj')
+eq('vars lowercase alias', lower_vars.workspaceroot, '/tmp/proj')
+eq('vars explicit lowercase workspaceRoot', A.build_variable_table({ workspaceroot = '/tmp/root' }).workspaceRoot, '/tmp/root')
 eq(
   'expand string',
   A.expand_variables('${workspaceRoot}/build/app.elf', vars),
