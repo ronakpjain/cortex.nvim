@@ -39,6 +39,10 @@ echo "== RTOS browser tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_rtos.lua"
 
 echo
+echo "== call-stack browser tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_callstack.lua"
+
+echo
 echo "== live-watch hydration tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_live_watch.lua"
 

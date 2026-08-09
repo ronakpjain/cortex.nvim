@@ -16,6 +16,7 @@
 ---   require('cortex').clear()       -- :CortexDebugWatchClear
 ---   require('cortex').telnet(cmd)   -- :CortexDebugTelnet
 ---   require('cortex').rtos_toggle() -- :CortexDebugRTOS
+---   require('cortex').callstack_toggle() -- :CortexDebugCallStack
 ---
 --- Only Neovim/libuv APIs are used; nvim-dap is required lazily and only for
 --- the adapter registration and symbol resolution.
@@ -70,6 +71,15 @@ local defaults = {
     stack_word_bytes = 4,
     symbols = {},
     fields = {},
+    window = nil,
+  },
+
+  -- Separate current stopped-thread DAP stack window. This is not a
+  -- per-FreeRTOS-task unwinder; dapui remains available as usual.
+  callstack = {
+    auto_open = false,
+    auto_refresh_on_stop = false,
+    levels = 0,
     window = nil,
   },
 
@@ -1680,13 +1690,16 @@ end
 
 local peripheral = require('cortex.peripheral')
 local rtos = require('cortex.rtos')
+local callstack = require('cortex.callstack')
 M._peripheral = peripheral -- exposed for tests/statusline integrations
 M._rtos = rtos -- exposed for tests/statusline integrations
+M._callstack = callstack -- exposed for tests/statusline integrations
 
 local function on_session_start(config)
   invalidate_hydration()
   peripheral.on_session_start(config)
   rtos.on_session_start(config)
+  callstack.on_session_start(config)
   -- Never carry addresses or variable handles across debug sessions.
   for _, e in ipairs(watch.entries) do
     -- Do not display a raw command/address value from the previous target
@@ -1723,6 +1736,7 @@ local function on_session_end()
   invalidate_hydration()
   peripheral.on_session_end()
   rtos.on_session_end()
+  callstack.on_session_end()
   watch.session_config = nil
   for _, e in ipairs(watch.entries) do
     if e.kind == 'symbol' then
@@ -1749,6 +1763,7 @@ local function register_listeners(dap)
   dap.listeners.after.event_continued[key] = function()
     peripheral.on_session_continued()
     rtos.on_session_continued()
+    callstack.on_session_continued()
     -- Do not let an in-flight stopped-state hydration chain issue more DAP
     -- requests after resume. Existing address plans remain telnet-only.
     invalidate_hydration()
@@ -1756,6 +1771,7 @@ local function register_listeners(dap)
   dap.listeners.after.event_stopped[key] = function()
     peripheral.on_session_stopped()
     rtos.on_session_stopped()
+    callstack.on_session_stopped()
     -- A stopped event is the only point at which C-expression metadata is
     -- hydrated. Running samples below never issue evaluate/variables calls.
     for _, e in ipairs(watch.entries) do
@@ -1889,6 +1905,25 @@ function M.rtos_refresh(callback)
   return rtos.refresh(callback)
 end
 
+function M.callstack_open()
+  return callstack.open()
+end
+
+function M.callstack_close()
+  return callstack.close()
+end
+
+function M.callstack_toggle()
+  return callstack.toggle()
+end
+
+function M.callstack_refresh(callback)
+  return callstack.refresh(callback)
+end
+
+M.open_callstack = M.callstack_open
+M.refresh_callstack = M.callstack_refresh
+
 M.open_rtos = M.rtos_open
 M.refresh_rtos = M.rtos_refresh
 
@@ -1925,6 +1960,15 @@ function M._create_commands()
   if vim.fn.exists(':CortexFreeRTOS') ~= 2 then cmd('CortexFreeRTOS', function()
     M.rtos_toggle()
   end, { desc = 'Toggle the stopped-only FreeRTOS task browser' }) end
+  if vim.fn.exists(':CortexDebugCallStack') ~= 2 then cmd('CortexDebugCallStack', function()
+    M.callstack_toggle()
+  end, { desc = 'Toggle the stopped-only current call stack' }) end
+  if vim.fn.exists(':CortexDebugCallStackRefresh') ~= 2 then cmd('CortexDebugCallStackRefresh', function()
+    M.callstack_refresh()
+  end, { desc = 'Refresh the current call stack (stopped only)' }) end
+  if vim.fn.exists(':CortexDebugStack') ~= 2 then cmd('CortexDebugStack', function()
+    M.callstack_toggle()
+  end, { desc = 'Toggle the stopped-only current call stack' }) end
 end
 
 ----------------------------------------------------------------------------
@@ -1936,6 +1980,7 @@ function M.setup(opts)
   M.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts or {})
   peripheral.setup(M)
   rtos.setup(M)
+  callstack.setup(M)
 
   local dap = get_dap()
   if not dap then

@@ -11,6 +11,8 @@ A self-contained ARM Cortex-M debugging plugin for Neovim.
   separate read-only register/bitfield tree using its own telnet client.
 * **Stopped-only FreeRTOS task browser** (`lua/cortex/rtos.lua`) — walks
   FreeRTOS kernel task lists through stopped GDB expressions.
+* **Stopped-only current call-stack window** (`lua/cortex/callstack.lua`) —
+  displays the ordinary DAP/GDB stack for the halted CPU thread.
 * **No external dependencies**: no Python, no Node, no VSCode extension, no
   third-party Lua rocks. Only Neovim + libuv APIs.
 
@@ -70,6 +72,12 @@ require('cortex').setup({
     -- Override symbols/fields when a kernel or port renames them.
     symbols = {},
     fields = {},
+  },
+
+  callstack = {
+    auto_open = false,
+    auto_refresh_on_stop = false,
+    levels = 0,
   },
 
   live_watch = {
@@ -153,6 +161,7 @@ Standard nvim-dap / `.vscode/launch.json` format — nvim-dap picks up
 | `liveWatch` | – | `{ enabled, samplesPerSecond, telnetPort }`, used by the plugin only |
 | `svdFile` / `svdPath` | – | CMSIS-SVD path for the stopped-only peripheral browser |
 | `rtos` | – | `{ enabled, autoOpen, autoRefreshOnStop }` for the FreeRTOS task browser |
+| `callstack` | – | `{ autoOpen, autoRefreshOnStop, levels }` for the current DAP stack window |
 
 `${workspaceFolder}`, `${workspaceRoot}`, `${cwd}`, `${userHome}`, `${file}`,
 `${fileDirname}`, `${fileBasename}`, `${fileBasenameNoExtension}` and
@@ -198,7 +207,21 @@ kernel symbols are skipped; `rtos.symbols`, `rtos.fields`, `maxTasks`, and
 `maxPriorities` can override firmware-specific names and limits. It never
 polls while running and never shares the Live Watch or SVD connections.
 
-## Four value views
+## Call-stack window
+
+`:CortexDebugCallStack` opens a separate view of the current stopped CPU
+thread's DAP/GDB stack. `r` or `:CortexDebugCallStackRefresh` refreshes it,
+`<CR>` selects a frame, and `q` closes it. This is intentionally the normal
+DAP stack, not an attempted unwinder for every FreeRTOS task; dapui remains
+available for the same session.
+
+| command | action |
+| --- | --- |
+| `:CortexDebugCallStack` | toggle the current stopped-thread stack |
+| `:CortexDebugCallStackRefresh` | request `stackTrace` while stopped |
+| `:CortexDebugStack` | alias for `:CortexDebugCallStack` |
+
+## Five value views
 
 These views are intentionally separate:
 
@@ -211,9 +234,11 @@ These views are intentionally separate:
 * **FreeRTOS tasks** are shown by `:CortexDebugRTOS`. The view is a separate
   stopped-only GDB task-list walk; it is not merged into DAP threads, SVD
   values, or Live Watch polling.
+* **Call stack** is shown by `:CortexDebugCallStack`. It requests only the
+  current stopped DAP thread's stack and is independent of the RTOS task list.
 * **Live Watch** is the native `:CortexDebugWatch` window. It uses its own
-  polling socket for memory/symbol samples while running; SVD values are never
-  merged into that queue or window.
+  polling socket for memory/symbol samples while running; SVD and RTOS values
+  are never merged into that queue or window.
 
 SVD paths expand `${workspaceFolder}`, `${workspaceRoot}`, and `${cwd}`.
 Launch configuration `svdFile` takes precedence over `svdPath`; setup options
