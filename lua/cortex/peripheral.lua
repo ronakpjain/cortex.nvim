@@ -5,6 +5,7 @@
 -- target is running.
 local api = vim.api
 local svd = require('cortex.svd')
+local ui = require('cortex.ui')
 
 local P = {}
 local core
@@ -290,9 +291,14 @@ local function create_buf()
   vim.bo[state.bufnr].swapfile, vim.bo[state.bufnr].filetype = false, 'cortex-peripheral'
   pcall(api.nvim_buf_set_name, state.bufnr, 'cortex://peripherals')
   local opts = { buffer = state.bufnr, nowait = true, silent = true }
+  local function mouse_toggle()
+    if ui.mouse_line(state.winid) then toggle_current() end
+  end
   vim.keymap.set('n', 'q', P.close, opts)
   vim.keymap.set('n', '<CR>', toggle_current, opts)
   vim.keymap.set('n', 'r', P.refresh, opts)
+  vim.keymap.set('n', '<LeftMouse>', mouse_toggle, opts)
+  vim.keymap.set('n', '<2-LeftMouse>', mouse_toggle, opts)
   return state.bufnr
 end
 

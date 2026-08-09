@@ -23,6 +23,7 @@
 
 local api = vim.api
 local uv = vim.uv or vim.loop
+local ui = require('cortex.ui')
 
 local M = {}
 
@@ -45,6 +46,8 @@ local defaults = {
   -- Filetypes the launch.json `cortex-debug` configurations apply to
   -- (only used by nvim-dap's legacy `load_launchjs`).
   filetypes = { 'c', 'cpp', 'rust', 'asm' },
+  -- Auxiliary Cortex windows use mouse clicks for tree/frame actions.
+  mouse = true,
 
   -- CMSIS-SVD peripheral browser. Values are read only while stopped and
   -- use a Telnet connection independent of live_watch.telnet.
@@ -1139,6 +1142,9 @@ local function set_buf_keymaps(bufnr)
     local line = api.nvim_win_get_cursor(0)[1]
     M.remove_at_line(line)
   end, opts)
+  vim.keymap.set('n', '<LeftMouse>', function()
+    ui.mouse_line(watch.winid)
+  end, opts)
 end
 
 local function create_buf()
@@ -1691,9 +1697,11 @@ end
 local peripheral = require('cortex.peripheral')
 local rtos = require('cortex.rtos')
 local callstack = require('cortex.callstack')
+local target = require('cortex.target')
 M._peripheral = peripheral -- exposed for tests/statusline integrations
 M._rtos = rtos -- exposed for tests/statusline integrations
 M._callstack = callstack -- exposed for tests/statusline integrations
+M._target = target -- exposed for tests/statusline integrations
 
 local function on_session_start(config)
   invalidate_hydration()
@@ -1921,6 +1929,25 @@ function M.callstack_refresh(callback)
   return callstack.refresh(callback)
 end
 
+function M.debug_select()
+  return target.select()
+end
+
+function M.debug_start()
+  return target.start()
+end
+
+function M.debug_clear_target()
+  return target.clear()
+end
+
+function M.debug_target()
+  return target.status()
+end
+
+M.select_debug_target = M.debug_select
+M.start_debug = M.debug_start
+
 M.open_callstack = M.callstack_open
 M.refresh_callstack = M.callstack_refresh
 
@@ -1969,6 +1996,18 @@ function M._create_commands()
   if vim.fn.exists(':CortexDebugStack') ~= 2 then cmd('CortexDebugStack', function()
     M.callstack_toggle()
   end, { desc = 'Toggle the stopped-only current call stack' }) end
+  if vim.fn.exists(':CortexDebugSelect') ~= 2 then cmd('CortexDebugSelect', function()
+    M.debug_select()
+  end, { desc = 'Select and remember a DAP launch target' }) end
+  if vim.fn.exists(':CortexDebugStart') ~= 2 then cmd('CortexDebugStart', function()
+    M.debug_start()
+  end, { desc = 'Start or continue the remembered DAP target' }) end
+  if vim.fn.exists(':CortexDebugTarget') ~= 2 then cmd('CortexDebugTarget', function()
+    M.debug_target()
+  end, { desc = 'Show the remembered DAP launch target' }) end
+  if vim.fn.exists(':CortexDebugClearTarget') ~= 2 then cmd('CortexDebugClearTarget', function()
+    M.debug_clear_target()
+  end, { desc = 'Forget the remembered DAP launch target' }) end
 end
 
 ----------------------------------------------------------------------------
@@ -1978,9 +2017,13 @@ end
 ---@param opts table|nil
 function M.setup(opts)
   M.config = vim.tbl_deep_extend('force', vim.deepcopy(defaults), opts or {})
+  if M.config.mouse and not vim.o.mouse:find('a', 1, true) then
+    vim.opt.mouse:append('a')
+  end
   peripheral.setup(M)
   rtos.setup(M)
   callstack.setup(M)
+  target.setup(M)
 
   local dap = get_dap()
   if not dap then

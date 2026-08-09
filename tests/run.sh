@@ -27,6 +27,10 @@ echo "== unit tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_adapter.lua"
 
 echo
+echo "== persistent target tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_target.lua"
+
+echo
 echo "== SVD parser tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_svd.lua"
 

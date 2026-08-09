@@ -4,6 +4,7 @@
 -- OpenOCD live-watch socket.  It walks the kernel's task lists only while
 -- the target is halted, and cancels every in-flight request on resume.
 local api = vim.api
+local ui = require('cortex.ui')
 
 local P = {}
 local core
@@ -636,8 +637,13 @@ local function create_buf()
   vim.bo[bufnr].filetype = 'cortex-rtos'
   pcall(api.nvim_buf_set_name, bufnr, 'cortex://freertos')
   local opts = { buffer = bufnr, nowait = true, silent = true }
+  local function mouse_focus()
+    ui.mouse_line(state.winid)
+  end
   vim.keymap.set('n', 'q', P.close, opts)
   vim.keymap.set('n', 'r', function() P.refresh() end, opts)
+  vim.keymap.set('n', '<LeftMouse>', mouse_focus, opts)
+  vim.keymap.set('n', '<2-LeftMouse>', mouse_focus, opts)
   state.bufnr = bufnr
   return bufnr
 end

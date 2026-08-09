@@ -4,6 +4,7 @@
 -- it requests the ordinary DAP stackTrace for the currently stopped CPU
 -- thread, and never polls while the target is running.
 local api = vim.api
+local ui = require('cortex.ui')
 
 local P = {}
 local core
@@ -135,9 +136,14 @@ local function create_buf()
   vim.bo[bufnr].filetype = 'cortex-callstack'
   pcall(api.nvim_buf_set_name, bufnr, 'cortex://call-stack')
   local opts = { buffer = bufnr, nowait = true, silent = true }
+  local function mouse_select()
+    if ui.mouse_line(state.winid) then P.select() end
+  end
   vim.keymap.set('n', 'q', P.close, opts)
   vim.keymap.set('n', 'r', function() P.refresh() end, opts)
   vim.keymap.set('n', '<CR>', P.select, opts)
+  vim.keymap.set('n', '<LeftMouse>', mouse_select, opts)
+  vim.keymap.set('n', '<2-LeftMouse>', mouse_select, opts)
   state.bufnr = bufnr
   return bufnr
 end

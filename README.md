@@ -50,6 +50,7 @@ require('cortex').setup({
   adapter_args = {},
   adapter_name = 'cortex-debug',
   filetypes = { 'c', 'cpp', 'rust', 'asm' },
+  mouse = true,                 -- enable mouse actions in Cortex windows
 
   peripheral = {
     -- Either may also be supplied by launch config as svdFile/svdPath.
@@ -180,6 +181,24 @@ threads / stacks / scopes / watches / repl panes.
 
 Out of scope (by design): pre/postLaunchTask, semihosting UIs, disassembly.
 
+## Persistent target selection
+
+Use the Cortex commands instead of the raw `:DapContinue` picker:
+
+| command | action |
+| --- | --- |
+| `:CortexDebugStart` | start the remembered target, or choose one the first time |
+| `:CortexDebugSelect` | choose and remember a target for this workspace |
+| `:CortexDebugTarget` | show the remembered target |
+| `:CortexDebugClearTarget` | forget the remembered target |
+
+The selection is keyed by the nearest workspace containing `.vscode/launch.json`
+and is stored in Neovim's state directory at
+`cortex.nvim/targets.json`. The plugin only reads project launch files; it
+never writes into the project. If a saved target disappears, the selector
+opens again. A normal active session still uses `:CortexDebugStart` to
+continue it.
+
 ## FreeRTOS task view
 
 Enable it in a launch configuration or open it manually:
@@ -211,7 +230,7 @@ polls while running and never shares the Live Watch or SVD connections.
 
 `:CortexDebugCallStack` opens a separate view of the current stopped CPU
 thread's DAP/GDB stack. `r` or `:CortexDebugCallStackRefresh` refreshes it,
-`<CR>` selects a frame, and `q` closes it. This is intentionally the normal
+`<CR>` or a mouse click selects a frame, and `q` closes it. This is intentionally the normal
 DAP stack, not an attempted unwinder for every FreeRTOS task; dapui remains
 available for the same session.
 
@@ -257,7 +276,9 @@ values keep updating without halting the target.
 | `:CortexDebugTelnet [cmd]` | send a raw OpenOCD command |
 
 Inside the window: `a` add, `d` delete under cursor, `c` clear, `r` refresh,
-`q` close.
+`q` close. Clicking a peripheral or register expands it, and clicking a
+call-stack row selects that frame. Enable Neovim
+mouse input with `vim.opt.mouse = 'a'` if your configuration does not already.
 
 Entries can be a raw address (`0x20000010`), an OpenOCD command (`reg`,
 `mdw 0x20000000 4`, `targets`, …) or a C expression (`gpio_config`,
@@ -270,6 +291,8 @@ while the target runs; running samples never issue DAP/GDB requests. Add or
 refresh a new C expression while stopped, or stop once to hydrate it.
 
 Lua API: `require('cortex').start/stop/toggle/add/clear/refresh/telnet/status`.
+Persistent DAP target API: `debug_start()`, `debug_select()`,
+`debug_target()`, and `debug_clear_target()`.
 
 ## Debugging the adapter
 
