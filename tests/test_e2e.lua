@@ -130,10 +130,7 @@ end
 
 local r = wait_response(request('initialize', { adapterID = 'cortex-debug', clientID = 'test' }))
 check('initialize responded', r ~= nil and r.success == true, r and vim.inspect(r))
-check(
-  'capabilities: configurationDone',
-  r and r.body and r.body.supportsConfigurationDoneRequest == true
-)
+check('capabilities: configurationDone', r and r.body and r.body.supportsConfigurationDoneRequest == true)
 check('capabilities: terminate', r and r.body and r.body.supportsTerminateRequest == true)
 check('capabilities: setVariable', r and r.body and r.body.supportsSetVariable == true)
 

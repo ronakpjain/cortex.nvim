@@ -44,12 +44,12 @@ eq('vars workspaceRoot', vars.workspaceRoot, '/tmp/proj')
 local lower_vars = A.build_variable_table({ cwd = '${workspaceroot}' }, '/tmp/proj')
 eq('vars lowercase workspaceRoot', lower_vars.workspaceRoot, '/tmp/proj')
 eq('vars lowercase alias', lower_vars.workspaceroot, '/tmp/proj')
-eq('vars explicit lowercase workspaceRoot', A.build_variable_table({ workspaceroot = '/tmp/root' }).workspaceRoot, '/tmp/root')
 eq(
-  'expand string',
-  A.expand_variables('${workspaceRoot}/build/app.elf', vars),
-  '/tmp/proj/build/app.elf'
+  'vars explicit lowercase workspaceRoot',
+  A.build_variable_table({ workspaceroot = '/tmp/root' }).workspaceRoot,
+  '/tmp/root'
 )
+eq('expand string', A.expand_variables('${workspaceRoot}/build/app.elf', vars), '/tmp/proj/build/app.elf')
 eq(
   'expand nested',
   A.expand_variables({ configFiles = { '${workspaceRoot}/x.cfg' } }, vars),
@@ -78,6 +78,16 @@ eq('reader completes', #rest, 1)
 reader = A.Reader.new()
 eq('reader two', #reader:feed(encoded .. encoded), 2)
 
+-- A malformed header must be discarded rather than poisoning all later feeds.
+reader = A.Reader.new()
+local bad_msgs, framing_err = reader:feed('X-Header: nope\r\n\r\n')
+eq('reader malformed returns no messages', #bad_msgs, 0)
+check('reader malformed reports error', framing_err ~= nil, framing_err)
+local recovered, recovered_err = reader:feed(encoded)
+eq('reader recovers after malformed frame', #recovered, 1)
+eq('reader recovered event', recovered[1].event, 'initialized')
+eq('reader recovery has no error', recovered_err, nil)
+
 -------------------------------------------------------------------- MI parse
 
 eq('c-string simple', (A.parse_c_string('"hello"')), 'hello')
@@ -100,7 +110,9 @@ eq('async reason', rec.results.reason, 'breakpoint-hit')
 eq('async bkptno', rec.results.bkptno, '1')
 eq('async frame func', rec.results.frame.func, 'main')
 
-rec = A.parse_mi_line('^done,stack=[frame={level="0",addr="0x08000100",func="main",file="m.c",fullname="/p/m.c",line="12"},frame={level="1",func="_start"}]')
+rec = A.parse_mi_line(
+  '^done,stack=[frame={level="0",addr="0x08000100",func="main",file="m.c",fullname="/p/m.c",line="12"},frame={level="1",func="_start"}]'
+)
 eq('stack len', #rec.results.stack, 2)
 eq('stack[1].func', rec.results.stack[1].func, 'main')
 eq('stack[2].func', rec.results.stack[2].func, '_start')
@@ -139,28 +151,32 @@ eq('openocd defaults', A.build_openocd_argv({ configFiles = { 'i/stlink.cfg', 't
   'telnet_port 4444',
 })
 
-eq('openocd custom', A.build_openocd_argv({
-  serverpath = '/opt/openocd',
-  searchDir = '/scripts',
-  configFiles = 'board.cfg',
-  gdbPort = 50000,
-  telnetPort = 50001,
-  openOCDLaunchCommands = { 'adapter speed 4000' },
-  serverArgs = { '-d2' },
-}), {
-  '/opt/openocd',
-  '-s',
-  '/scripts',
-  '-f',
-  'board.cfg',
-  '-c',
-  'gdb_port 50000',
-  '-c',
-  'telnet_port 50001',
-  '-c',
-  'adapter speed 4000',
-  '-d2',
-})
+eq(
+  'openocd custom',
+  A.build_openocd_argv({
+    serverpath = '/opt/openocd',
+    searchDir = '/scripts',
+    configFiles = 'board.cfg',
+    gdbPort = 50000,
+    telnetPort = 50001,
+    openOCDLaunchCommands = { 'adapter speed 4000' },
+    serverArgs = { '-d2' },
+  }),
+  {
+    '/opt/openocd',
+    '-s',
+    '/scripts',
+    '-f',
+    'board.cfg',
+    '-c',
+    'gdb_port 50000',
+    '-c',
+    'telnet_port 50001',
+    '-c',
+    'adapter speed 4000',
+    '-d2',
+  }
+)
 
 --------------------------------------------------------- adapter unit bits
 
@@ -176,6 +192,22 @@ check('initialize success', sent[1].success == true)
 check('supportsConfigurationDoneRequest', sent[1].body.supportsConfigurationDoneRequest == true)
 check('supportsTerminateRequest', sent[1].body.supportsTerminateRequest == true)
 check('supportsEvaluateForHovers', sent[1].body.supportsEvaluateForHovers == true)
+check('cancel is not advertised', sent[1].body.supportsCancelRequest == nil)
+
+-- Unsupported cancellation is serialized like other unsupported requests;
+-- it must not bypass an in-flight operation as an "immediate" request.
+local cancel_adapter = A.Adapter.new()
+local cancel_sent = {}
+cancel_adapter._write = function(_, message)
+  cancel_sent[#cancel_sent + 1] = message
+end
+cancel_adapter.busy = true
+cancel_adapter:handle_message({ seq = 2, type = 'request', command = 'cancel' })
+eq('unsupported cancel queued', #cancel_adapter.queue, 1)
+eq('unsupported cancel not answered immediately', #cancel_sent, 0)
+cancel_adapter.busy = false
+cancel_adapter:pump()
+eq('unsupported cancel response', cancel_sent[1].success, false)
 
 sent = {}
 adapter.current_thread = 1
@@ -207,7 +239,11 @@ eq('terminated event', sent[2].event, 'terminated')
 eq('gdb default path', adapter:_gdb_path({}), 'arm-none-eabi-gdb')
 eq('gdb toolchainPrefix', adapter:_gdb_path({ toolchainPrefix = 'arm-none-eabi' }), 'arm-none-eabi-gdb')
 eq('gdb prefix custom', adapter:_gdb_path({ toolchainPrefix = 'riscv64-unknown-elf' }), 'riscv64-unknown-elf-gdb')
-eq('gdb explicit path', adapter:_gdb_path({ gdbPath = '/opt/gcc/bin/arm-none-eabi-gdb' }), '/opt/gcc/bin/arm-none-eabi-gdb')
+eq(
+  'gdb explicit path',
+  adapter:_gdb_path({ gdbPath = '/opt/gcc/bin/arm-none-eabi-gdb' }),
+  '/opt/gcc/bin/arm-none-eabi-gdb'
+)
 eq('gdb toolchainPath', adapter:_gdb_path({ toolchainPath = '/opt/gcc/bin' }), '/opt/gcc/bin/arm-none-eabi-gdb')
 
 -- target spec
@@ -215,6 +251,72 @@ eq('target default', adapter:_target_spec({}), 'localhost:3333')
 eq('target port', adapter:_target_spec({ gdbPort = 50000 }), 'localhost:50000')
 eq('target host', adapter:_target_spec({ gdbTarget = '192.168.1.5' }), '192.168.1.5:3333')
 eq('target host:port', adapter:_target_spec({ gdbTarget = '192.168.1.5:1234' }), '192.168.1.5:1234')
+
+-- Any launch setup error after resources are spawned must tear both down.
+local cleanup_adapter = A.Adapter.new()
+local cleanup_gdb = { commands = {}, terminated = false }
+function cleanup_gdb:is_alive()
+  return true
+end
+function cleanup_gdb:send(command)
+  self.commands[#self.commands + 1] = command
+  return { class = 'done', results = {} }
+end
+function cleanup_gdb:terminate()
+  self.terminated = true
+end
+local cleanup_server = { killed = false }
+function cleanup_server:kill()
+  self.killed = true
+end
+cleanup_adapter._prepare_config = function()
+  return {}
+end
+cleanup_adapter._start_server = function(self)
+  self.server = cleanup_server
+end
+cleanup_adapter._start_gdb = function(self)
+  self.gdb = cleanup_gdb
+  error('injected initialization failure')
+end
+local cleanup_ok, cleanup_err = pcall(cleanup_adapter._launch_or_attach, cleanup_adapter, {}, false)
+check(
+  'launch initialization failure propagated',
+  not cleanup_ok and tostring(cleanup_err):match('injected initialization failure')
+)
+check('failed launch terminates gdb', cleanup_gdb.terminated == true)
+check('failed launch kills server', cleanup_server.killed == true)
+eq('failed launch clears gdb', cleanup_adapter.gdb, nil)
+eq('failed launch clears server', cleanup_adapter.server, nil)
+
+-- Teardown invalidates a suspended startup before it can install a new GDB.
+local race_adapter = A.Adapter.new()
+local fresh_gdb = { uses = 0 }
+race_adapter._prepare_config = function()
+  return {}
+end
+race_adapter._start_server = function() end
+race_adapter._start_gdb = function(self, _, generation)
+  coroutine.yield()
+  self:_assert_lifecycle(generation)
+  self.gdb = fresh_gdb
+  return fresh_gdb
+end
+race_adapter._write = function() end
+race_adapter.shutdown = function() end
+local race_ok, race_err
+local launch_task = coroutine.create(function()
+  race_ok, race_err = pcall(race_adapter._launch_or_attach, race_adapter, {}, false)
+end)
+check(
+  'launch task suspended during startup',
+  coroutine.resume(launch_task) and coroutine.status(launch_task) == 'suspended'
+)
+race_adapter:on_disconnect({ seq = 3, command = 'disconnect', arguments = { terminateDebuggee = true } })
+check('launch task resumes after teardown', coroutine.resume(launch_task) and coroutine.status(launch_task) == 'dead')
+check('teardown invalidates launch generation', race_ok == false and tostring(race_err):match('session ended'))
+eq('stale launch does not install fresh gdb', race_adapter.gdb, nil)
+eq('stale launch does not use fresh gdb', fresh_gdb.uses, 0)
 
 io.stdout:write(string.format('\n%d/%d checks passed\n', total - failures, total))
 os.exit(failures == 0 and 0 or 1)

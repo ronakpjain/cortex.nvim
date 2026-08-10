@@ -30,7 +30,9 @@ local tmp = uv.fs_mkdtemp('/tmp/cortex-attach-XXXXXX')
 
 local fake_gdb = tmp .. '/fake-gdb'
 local fh = assert(io.open(fake_gdb, 'w'))
-fh:write(string.format('#!/bin/sh\nexec %q --headless --clean -u NONE -l %q "$@"\n', nvim, root .. '/tests/fake_gdb.lua'))
+fh:write(
+  string.format('#!/bin/sh\nexec %q --headless --clean -u NONE -l %q "$@"\n', nvim, root .. '/tests/fake_gdb.lua')
+)
 fh:close()
 uv.fs_chmod(fake_gdb, 493)
 
@@ -128,7 +130,11 @@ local before = #events + 1
 r = wait_response(request('configurationDone'))
 check('configurationDone responded', r ~= nil and r.success == true)
 local stopped = wait_event('stopped', 8000, before)
-check('synthetic entry stop on attach', stopped ~= nil and stopped.body.reason == 'entry', stopped and vim.inspect(stopped))
+check(
+  'synthetic entry stop on attach',
+  stopped ~= nil and stopped.body.reason == 'entry',
+  stopped and vim.inspect(stopped)
+)
 
 r = wait_response(request('threads'))
 check('threads responded on attach', r ~= nil and r.success == true)

@@ -69,7 +69,10 @@ local function handle(line)
     )
     return
   elseif verb == '-stack-list-variables' then
-    reply(token, '^done,variables=[{name="counter",type="int",value="7"},{name="flag",type="char",value="1 \'\\001\'"}]')
+    reply(
+      token,
+      '^done,variables=[{name="counter",type="int",value="7"},{name="flag",type="char",value="1 \'\\001\'"}]'
+    )
     return
   elseif verb == '-data-list-register-names' then
     reply(token, '^done,register-names=["r0","r1","sp","pc"]')

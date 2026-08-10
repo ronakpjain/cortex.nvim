@@ -188,18 +188,24 @@ end
 ---@return table
 function M.build_variable_table(config, cwd)
   config = config or {}
-  local workspace = config.workspaceRoot or config.workspaceroot
-    or config.workspaceFolder or config.workspacefolder
-    or config.cwd or cwd or uv.cwd()
+  local workspace = config.workspaceRoot
+    or config.workspaceroot
+    or config.workspaceFolder
+    or config.workspacefolder
+    or config.cwd
+    or cwd
+    or uv.cwd()
   workspace = tostring(workspace)
   -- nvim-dap expands `${workspaceFolder}` but older versions (and some
   -- launch.json files) still pass workspace placeholders through. Treat the
   -- canonical spellings and lowercase variants as the Neovim working
   -- directory instead of making a literal directory named `${workspaceRoot}`.
   local workspace_placeholder = workspace:lower()
-  if workspace_placeholder == '${workspaceroot}'
-      or workspace_placeholder == '${workspacefolder}'
-      or workspace_placeholder == '${cwd}' then
+  if
+    workspace_placeholder == '${workspaceroot}'
+    or workspace_placeholder == '${workspacefolder}'
+    or workspace_placeholder == '${cwd}'
+  then
     workspace = cwd or uv.cwd()
   end
   workspace = normalize(expanduser(workspace))
@@ -232,13 +238,15 @@ end
 ---@return any
 function M.expand_variables(value, variables)
   if type(value) == 'string' then
-    return (value:gsub('%${([A-Za-z_][A-Za-z0-9_]*)}', function(key)
-      local replacement = variables[key]
-      if replacement == nil then
-        return '${' .. key .. '}'
-      end
-      return tostring(replacement)
-    end))
+    return (
+      value:gsub('%${([A-Za-z_][A-Za-z0-9_]*)}', function(key)
+        local replacement = variables[key]
+        if replacement == nil then
+          return '${' .. key .. '}'
+        end
+        return tostring(replacement)
+      end)
+    )
   end
   if type(value) == 'table' then
     local out = {}
@@ -294,8 +302,13 @@ function Reader:feed(chunk)
         length = tonumber(vim.trim(value))
       end
     end
-    if not length then
-      return messages, 'missing Content-Length header'
+    if not length or length < 0 or length ~= math.floor(length) then
+      -- The body boundary is unknowable without a valid length. Drop the
+      -- buffered malformed frame so a later valid frame can be read instead
+      -- of repeatedly failing on the same header forever.
+      self.buf = ''
+      local err = length == nil and 'missing Content-Length header' or 'invalid Content-Length header'
+      return messages, err
     end
     local body_start = header_end + sep
     if #self.buf < body_start + length - 1 then
@@ -1149,7 +1162,6 @@ local IMMEDIATE = {
   pause = true,
   disconnect = true,
   terminate = true,
-  cancel = true,
 }
 
 ---@class cortex.dap.Adapter
@@ -1169,14 +1181,13 @@ function Adapter.new()
     is_attach = false,
     no_debug = false,
     shutting_down = false,
+    lifecycle_generation = 0,
     configuration_done = false,
     current_thread = 1,
     stopped = true,
     breakpoints = {},
     handles = {},
     handle_seq = 1000,
-    varobjs = {},
-    pending_writes = 0,
   }, Adapter)
 end
 
@@ -1191,15 +1202,11 @@ function Adapter:_write(message)
     return
   end
   log('<<', vim.trim(data:gsub('^Content%-Length:[^\r\n]*\r?\n\r?\n', '')))
-  self.pending_writes = self.pending_writes + 1
   if self.stdout_pipe then
-    self.stdout_pipe:write(data, function()
-      self.pending_writes = self.pending_writes - 1
-    end)
+    self.stdout_pipe:write(data)
   else
     io.stdout:write(data)
     io.stdout:flush()
-    self.pending_writes = self.pending_writes - 1
   end
 end
 
@@ -1352,7 +1359,19 @@ function Adapter:_gdb_path(config)
   return expanduser(gdb_path)
 end
 
-function Adapter:_start_server(config)
+function Adapter:_lifecycle_is_current(generation)
+  return not self.shutting_down and generation == self.lifecycle_generation
+end
+
+function Adapter:_assert_lifecycle(generation)
+  if not self:_lifecycle_is_current(generation) then
+    error('debug session ended during initialization')
+  end
+end
+
+function Adapter:_start_server(config, generation)
+  generation = generation or self.lifecycle_generation
+  self:_assert_lifecycle(generation)
   local servertype = tostring(config.servertype or config.serverType or 'openocd'):lower()
   if servertype == 'external' then
     return
@@ -1366,7 +1385,9 @@ function Adapter:_start_server(config)
     cwd = self.cwd,
     env = config.env,
     on_output = function(chunk)
-      self:output(chunk, 'stdout')
+      if self:_lifecycle_is_current(generation) then
+        self:output(chunk, 'stdout')
+      end
     end,
   })
   if not server then
@@ -1390,8 +1411,9 @@ function Adapter:_start_server(config)
     timeout = timeout / 1000
   end
   local ok = wait_for_port(host, port, timeout, function()
-    return server:is_alive()
+    return server:is_alive() and self:_lifecycle_is_current(generation)
   end)
+  self:_assert_lifecycle(generation)
   if not ok then
     local output = server:recent_output()
     server:kill()
@@ -1401,7 +1423,9 @@ function Adapter:_start_server(config)
   end
 end
 
-function Adapter:_start_gdb(config)
+function Adapter:_start_gdb(config, generation)
+  generation = generation or self.lifecycle_generation
+  self:_assert_lifecycle(generation)
   local gdb_path = self:_gdb_path(config)
   local gdb, err = GDB.new({
     path = gdb_path,
@@ -1411,24 +1435,36 @@ function Adapter:_start_gdb(config)
     -- Accept `gdbArgs` as a native alias without dropping the standard key.
     args = config.gdbArgs or config.debuggerArgs,
     on_async = function(record)
-      self:_on_gdb_async(record)
+      if self:_lifecycle_is_current(generation) then
+        self:_on_gdb_async(record)
+      end
     end,
     on_stream = function(category, text)
-      self:output(text, category)
+      if self:_lifecycle_is_current(generation) then
+        self:output(text, category)
+      end
     end,
     on_exit = function()
-      self:_on_gdb_exit()
+      if self:_lifecycle_is_current(generation) then
+        self:_on_gdb_exit()
+      end
     end,
   })
   if not gdb then
     error(err)
   end
   self.gdb = gdb
-  gdb:send('-gdb-set mi-async on', 10)
-  gdb:send('-gdb-set confirm off', 10)
-  gdb:send('-gdb-set pagination off', 10)
-  gdb:send('-gdb-set print pretty on', 10)
-  gdb:send('-gdb-set breakpoint pending on', 10)
+  for _, command in ipairs({
+    '-gdb-set mi-async on',
+    '-gdb-set confirm off',
+    '-gdb-set pagination off',
+    '-gdb-set print pretty on',
+    '-gdb-set breakpoint pending on',
+  }) do
+    gdb:send(command, 10)
+    self:_assert_lifecycle(generation)
+  end
+  return gdb
 end
 
 function Adapter:_target_spec(config)
@@ -1447,14 +1483,18 @@ function Adapter:_target_spec(config)
   return string.format('localhost:%d', port)
 end
 
-function Adapter:_run_commands(commands)
+function Adapter:_run_commands(commands, generation, gdb)
+  generation = generation or self.lifecycle_generation
+  gdb = gdb or self.gdb
   for _, command in ipairs(as_list(commands)) do
+    self:_assert_lifecycle(generation)
     command = tostring(command)
     if command:sub(1, 1) == '-' then
-      self.gdb:send(command, 60)
+      gdb:send(command, 60)
     else
-      self.gdb:console_cmd(command, 60)
+      gdb:console_cmd(command, 60)
     end
+    self:_assert_lifecycle(generation)
   end
 end
 
@@ -1467,55 +1507,72 @@ function Adapter:on_attach(request)
 end
 
 function Adapter:_launch_or_attach(request, attach)
-  local config = self:_prepare_config(request)
-  self.is_attach = attach
+  local generation = self.lifecycle_generation
+  self:_assert_lifecycle(generation)
+  local ok, err = pcall(function()
+    local config = self:_prepare_config(request)
+    self.is_attach = attach
 
-  self:_start_server(config)
-  self:_start_gdb(config)
+    self:_start_server(config, generation)
+    local gdb = self:_start_gdb(config, generation)
+    self:_assert_lifecycle(generation)
 
-  if self.executable then
-    if not file_exists(self.executable) then
-      self:output(string.format('warning: executable not found: %s\n', self.executable), 'stderr')
-    end
-    local record = self.gdb:send('-file-exec-and-symbols ' .. mi_quote(self.executable), 60)
-    if not record_ok(record) then
-      error('could not load executable: ' .. record_error(record))
-    end
-  elseif not attach then
-    self:output('warning: no `executable` configured; nothing will be flashed\n', 'stderr')
-  end
-
-  self:_run_commands(attach and config.preAttachCommands or config.preLaunchCommands)
-
-  local target = self:_target_spec(config)
-  local record = self.gdb:send('-target-select extended-remote ' .. target, 30)
-  if not record_ok(record) then
-    error(string.format('could not connect to %s: %s', target, record_error(record)))
-  end
-
-  if not attach then
-    local overrides = as_list(config.overrideLaunchCommands)
-    if #overrides > 0 then
-      self:_run_commands(overrides)
-    else
-      self.gdb:console_cmd('monitor reset halt', 30)
-      if self.executable and config.loadFiles ~= false then
-        local dl = self.gdb:send('-target-download', 300)
-        if not record_ok(dl) then
-          error('flash download failed: ' .. record_error(dl))
-        end
+    if self.executable then
+      if not file_exists(self.executable) then
+        self:output(string.format('warning: executable not found: %s\n', self.executable), 'stderr')
       end
-      self.gdb:console_cmd('monitor reset halt', 30)
+      local record = gdb:send('-file-exec-and-symbols ' .. mi_quote(self.executable), 60)
+      self:_assert_lifecycle(generation)
+      if not record_ok(record) then
+        error('could not load executable: ' .. record_error(record))
+      end
+    elseif not attach then
+      self:output('warning: no `executable` configured; nothing will be flashed\n', 'stderr')
     end
-  else
-    self:_run_commands(config.overrideAttachCommands)
+
+    self:_run_commands(attach and config.preAttachCommands or config.preLaunchCommands, generation, gdb)
+
+    local target = self:_target_spec(config)
+    local record = gdb:send('-target-select extended-remote ' .. target, 30)
+    self:_assert_lifecycle(generation)
+    if not record_ok(record) then
+      error(string.format('could not connect to %s: %s', target, record_error(record)))
+    end
+
+    if not attach then
+      local overrides = as_list(config.overrideLaunchCommands)
+      if #overrides > 0 then
+        self:_run_commands(overrides, generation, gdb)
+      else
+        gdb:console_cmd('monitor reset halt', 30)
+        self:_assert_lifecycle(generation)
+        if self.executable and config.loadFiles ~= false then
+          local dl = gdb:send('-target-download', 300)
+          self:_assert_lifecycle(generation)
+          if not record_ok(dl) then
+            error('flash download failed: ' .. record_error(dl))
+          end
+        end
+        gdb:console_cmd('monitor reset halt', 30)
+        self:_assert_lifecycle(generation)
+      end
+    else
+      self:_run_commands(config.overrideAttachCommands, generation, gdb)
+    end
+
+    self:_run_commands(attach and config.postAttachCommands or config.postLaunchCommands, generation, gdb)
+
+    self:_assert_lifecycle(generation)
+    self.stopped = true
+    self:send_event('initialized')
+    self:send_response(request)
+  end)
+  if not ok then
+    if self:_lifecycle_is_current(generation) then
+      self:_teardown(not attach)
+    end
+    error(err, 0)
   end
-
-  self:_run_commands(attach and config.postAttachCommands or config.postLaunchCommands)
-
-  self.stopped = true
-  self:send_event('initialized')
-  self:send_response(request)
 end
 
 function Adapter:on_configurationDone(request)
@@ -1597,21 +1654,22 @@ function Adapter:_teardown(terminate)
     return
   end
   self.shutting_down = true
+  self.lifecycle_generation = self.lifecycle_generation + 1
   local gdb, server = self.gdb, self.server
   self.gdb, self.server = nil, nil
   if gdb and gdb:is_alive() then
     if not self.stopped then
-      gdb:send('-exec-interrupt --all', 2)
+      pcall(gdb.send, gdb, '-exec-interrupt --all', 2)
     end
     if self.is_attach and not terminate then
-      gdb:send('-target-detach', 3)
+      pcall(gdb.send, gdb, '-target-detach', 3)
     else
-      gdb:send('-target-disconnect', 3)
+      pcall(gdb.send, gdb, '-target-disconnect', 3)
     end
-    gdb:terminate()
+    pcall(gdb.terminate, gdb)
   end
   if server then
-    server:kill()
+    pcall(server.kill, server)
   end
   self._dead_gdb = gdb
   self._dead_server = server
@@ -2019,10 +2077,8 @@ end
 
 ---@return table|nil { varobj, numchild, value, type }
 function Adapter:_create_varobj(thread, level, expression)
-  local record = self.gdb:send(
-    string.format('-var-create --thread %d --frame %d - * %s', thread, level, mi_quote(expression)),
-    20
-  )
+  local record =
+    self.gdb:send(string.format('-var-create --thread %d --frame %d - * %s', thread, level, mi_quote(expression)), 20)
   if not record_ok(record) then
     return nil
   end
@@ -2031,7 +2087,6 @@ function Adapter:_create_varobj(thread, level, expression)
   if not name or name == '' then
     return nil
   end
-  self.varobjs[tostring(name)] = expression
   return {
     varobj = tostring(name),
     numchild = as_int(results.numchild, 0),
@@ -2137,10 +2192,8 @@ function Adapter:_register_variables(handle)
     return {}
   end
   local names = as_list((names_record.results or {})['register-names'])
-  local values_record = self.gdb:send(
-    string.format('-data-list-register-values --thread %d --frame %d x', handle.thread, handle.level),
-    20
-  )
+  local values_record =
+    self.gdb:send(string.format('-data-list-register-values --thread %d --frame %d x', handle.thread, handle.level), 20)
   if not record_ok(values_record) then
     return {}
   end
@@ -2326,10 +2379,8 @@ function Adapter:on_readMemory(request)
     self:send_response(request, { address = ref, data = '' })
     return
   end
-  local record = gdb:send(
-    string.format('-data-read-memory-bytes %s %d', mi_quote(string.format('(%s)+%d', ref, offset)), count),
-    20
-  )
+  local record =
+    gdb:send(string.format('-data-read-memory-bytes %s %d', mi_quote(string.format('(%s)+%d', ref, offset)), count), 20)
   if not record_ok(record) then
     self:send_response(request, nil, false, record_error(record))
     return
