@@ -1,10 +1,8 @@
--- Stopped-only FreeRTOS task browser.
---
--- This module deliberately uses the active DAP/GDB session rather than the
--- OpenOCD live-watch socket.  It walks the kernel's task lists only while
--- the target is halted, and cancels every in-flight request on resume.
-local api = vim.api
+-- Stopped-only FreeRTOS task browser backed by DAP/GDB expressions.
+local config_util = require('cortex.config')
+local session_util = require('cortex.session')
 local ui = require('cortex.ui')
+local view = require('cortex.view')
 
 local P = {}
 local core
@@ -23,6 +21,24 @@ local state = {
   element_mode = false,
 }
 P._state = state
+
+local pane = view.new(state, {
+  name = 'cortex://freertos',
+  filetype = 'cortex-rtos',
+  title = 'FreeRTOS Tasks',
+  element_title = 'Cortex FreeRTOS Tasks',
+  element = 'cortex_rtos',
+  float_width = 110,
+  float_height = 20,
+  window = {
+    position = 'bottom',
+    width = 90,
+    height = 16,
+    border = 'rounded',
+    focus_on_open = false,
+    min_width = 30,
+  },
+})
 
 local DEFAULTS = {
   enabled = false,
@@ -56,17 +72,10 @@ local DEFAULTS = {
   },
 }
 
-local function get(tbl, key)
-  return type(tbl) == 'table' and tbl[key] or nil
-end
-
 local function config()
   local base = (core and core.config and core.config.rtos) or {}
-  local session = get(state.session_config, 'rtos') or {}
-  local result = vim.tbl_deep_extend('force', vim.deepcopy(DEFAULTS), base, session)
-  -- Launch JSON normally uses camelCase while setup() uses Lua-style
-  -- snake_case. Accept both without changing the adapter's pass-through data.
-  local aliases = {
+  local launch = config_util.get(state.session_config, 'rtos')
+  return config_util.merge(DEFAULTS, base, launch, {
     auto_open = 'autoOpen',
     auto_refresh_on_stop = 'autoRefreshOnStop',
     max_tasks = 'maxTasks',
@@ -75,13 +84,7 @@ local function config()
     list_item_type = 'listItemType',
     stack_growth = 'stackGrowth',
     stack_word_bytes = 'stackWordBytes',
-  }
-  for snake, camel in pairs(aliases) do
-    if session[snake] == nil and session[camel] ~= nil then
-      result[snake] = session[camel]
-    end
-  end
-  return result
+  })
 end
 
 local function symbols()
@@ -138,40 +141,18 @@ local function parse_name(value)
   return text:gsub('%s*<.*$', ''):gsub('%z.*$', '')
 end
 
-P._parse_number = parse_number
-P._parse_pointer = pointer
 P._parse_name = parse_name
 
 local function active_session()
-  if core and core._stopped_session then
-    return core._stopped_session()
-  end
-  if core and core._is_stopped and not core._is_stopped() then
-    return nil
-  end
-  local ok, dap = pcall(require, 'dap')
-  if not ok or not dap then
-    return nil
-  end
-  local session = dap.session()
-  if not session or not session.initialized then
-    return nil
-  end
-  if not session.stopped_thread_id or not session.current_frame then
-    return nil
-  end
-  return session
+  return session_util.stopped(core)
 end
 
 local function stopped()
-  if core and core._is_stopped then
-    return core._is_stopped()
-  end
-  return active_session() ~= nil
+  return session_util.is_stopped(core)
 end
 
 local function valid(generation, session)
-  return state.generation == generation and stopped() and active_session() == session
+  return session_util.is_current(core, state, generation, session)
 end
 
 local function session_frame(session)
@@ -728,26 +709,8 @@ function P.walk(callback)
   return true
 end
 
-local function buf_valid()
-  return state.bufnr and api.nvim_buf_is_valid(state.bufnr)
-end
-
-local function win_valid()
-  return state.winid and api.nvim_win_is_valid(state.winid)
-end
-
-local function view_win()
-  if win_valid() then
-    return state.winid
-  end
-  if state.element_mode and buf_valid() and api.nvim_get_current_buf() == state.bufnr then
-    return api.nvim_get_current_win()
-  end
-  return nil
-end
-
 local function render()
-  if not buf_valid() then
+  if not pane:buf_valid() then
     return
   end
   local content_width = ui.content_width(state.bufnr, 90)
@@ -834,108 +797,40 @@ local function render()
 end
 
 local function window_config()
-  local cfg = config()
-  return cfg.window
-    or (core and core.config and core.config.window)
-    or { position = 'bottom', width = 90, height = 16, border = 'rounded', focus_on_open = false }
+  return config().window or (core and core.config and core.config.window)
 end
 
 local function create_buf()
-  if buf_valid() then
-    return state.bufnr
+  local bufnr, created = pane:buffer()
+  if not created then
+    return bufnr
   end
-  local bufnr = api.nvim_create_buf(false, true)
-  vim.bo[bufnr].buftype, vim.bo[bufnr].bufhidden, vim.bo[bufnr].swapfile = 'nofile', 'hide', false
-  vim.bo[bufnr].modifiable = false
-  vim.bo[bufnr].filetype = 'cortex-rtos'
-  pcall(api.nvim_buf_set_name, bufnr, 'cortex://freertos')
   local opts = { buffer = bufnr, nowait = true, silent = true }
   local function mouse_focus()
-    local winid = view_win()
+    local winid = pane:window()
     if winid then
       ui.mouse_line(winid)
     end
   end
-  local function close_from_buffer()
-    if state.element_mode then
-      local ok, dapui = pcall(require, 'dapui')
-      if ok and dapui.close then
-        dapui.close()
-      end
-    else
-      P.close()
-    end
-  end
-  vim.keymap.set('n', 'q', close_from_buffer, opts)
+  vim.keymap.set('n', 'q', function()
+    pane:close_from_buffer(P.close)
+  end, opts)
   vim.keymap.set('n', 'r', function()
     P.refresh()
   end, opts)
   vim.keymap.set('n', '<LeftMouse>', mouse_focus, opts)
   vim.keymap.set('n', '<2-LeftMouse>', mouse_focus, opts)
-  state.bufnr = bufnr
   return bufnr
 end
 
-local function open_window()
-  if win_valid() then
-    return state.winid
-  end
-  local bufnr, w = create_buf(), window_config()
-  local previous = api.nvim_get_current_win()
-  local winid
-  if w.position == 'float' then
-    local width = math.min(w.width or 90, math.max(30, vim.o.columns - 4))
-    local height = math.min(w.height or 16, math.max(5, vim.o.lines - 6))
-    winid = api.nvim_open_win(bufnr, false, {
-      relative = 'editor',
-      width = width,
-      height = height,
-      row = math.max(1, math.floor((vim.o.lines - height) / 2) - 1),
-      col = math.max(0, math.floor((vim.o.columns - width) / 2)),
-      style = 'minimal',
-      border = w.border or 'rounded',
-      title = ' FreeRTOS Tasks ',
-      title_pos = 'center',
-    })
-  else
-    local position = w.position or 'bottom'
-    local command
-    if position == 'left' then
-      command = 'topleft vertical ' .. (w.width or 90) .. 'split'
-    elseif position == 'top' then
-      command = 'topleft ' .. (w.height or 16) .. 'split'
-    elseif position == 'bottom' then
-      command = 'botright ' .. (w.height or 16) .. 'split'
-    else
-      command = 'botright vertical ' .. (w.width or 90) .. 'split'
-    end
-    vim.cmd(command)
-    winid = api.nvim_get_current_win()
-    api.nvim_win_set_buf(winid, bufnr)
-  end
-  vim.wo[winid].number, vim.wo[winid].relativenumber, vim.wo[winid].wrap, vim.wo[winid].signcolumn =
-    false, false, false, 'no'
-  pcall(function()
-    vim.wo[winid].winfixheight = true
-  end)
-  pcall(function()
-    vim.wo[winid].winfixwidth = true
-  end)
-  state.winid = winid
-  if not w.focus_on_open and api.nvim_win_is_valid(previous) then
-    api.nvim_set_current_win(previous)
-  end
-  render()
-  return winid
-end
-
 function P.open()
+  create_buf()
   if state.element_mode then
-    create_buf()
     render()
     return nil
   end
-  open_window()
+  pane:open(window_config())
+  render()
   return state.winid
 end
 
@@ -943,45 +838,25 @@ function P.close()
   if state.cancel_refresh then
     state.cancel_refresh('view closed')
   end
-  if state.element_mode then
-    return
-  end
-  if win_valid() then
-    pcall(api.nvim_win_close, state.winid, true)
-  end
-  state.winid = nil
+  pane:close()
 end
 
 function P.toggle()
-  if state.element_mode then
-    local ok, dapui = pcall(require, 'dapui')
-    if ok and dapui.float_element then
-      dapui.float_element('cortex_rtos', { width = 110, height = 20, enter = true })
-    end
-    return
+  if pane:win_valid() and state.cancel_refresh then
+    state.cancel_refresh('view closed')
   end
-  if win_valid() then
-    P.close()
-  else
-    P.open()
+  create_buf()
+  local action = pane:toggle(window_config())
+  if action == 'opened' then
+    render()
   end
 end
 
----Register this view as an nvim-dap-ui layout element.
 function P.element()
-  state.element_mode = true
   create_buf()
+  local element = pane:element(render, create_buf)
   render()
-  return {
-    buffer = function()
-      return create_buf()
-    end,
-    render = render,
-    allow_without_session = true,
-    float_defaults = function()
-      return { width = 110, height = 20, enter = true, title = 'Cortex FreeRTOS Tasks' }
-    end,
-  }
+  return element
 end
 
 function P.refresh(callback)
@@ -1080,7 +955,7 @@ end
 function P.on_session_stopped()
   state.status = 'stopped (refresh available)'
   render()
-  if (win_valid() or state.element_mode) and config().auto_refresh_on_stop then
+  if (pane:win_valid() or state.element_mode) and config().auto_refresh_on_stop then
     P.refresh()
   end
 end

@@ -1,11 +1,10 @@
--- Stopped-only CMSIS-SVD peripheral browser.
---
--- This module intentionally owns a Telnet connection separate from the live
--- watch connection.  It never asks DAP for values and never reads while the
--- target is running.
+-- Stopped-only CMSIS-SVD browser with its own OpenOCD connection.
 local api = vim.api
+local config_util = require('cortex.config')
+local Telnet = require('cortex.telnet')
 local svd = require('cortex.svd')
 local ui = require('cortex.ui')
+local view = require('cortex.view')
 
 local P = {}
 local core
@@ -27,9 +26,22 @@ local state = {
 }
 P._state = state
 
-local function get(tbl, key)
-  return type(tbl) == 'table' and tbl[key] or nil
-end
+local pane = view.new(state, {
+  name = 'cortex://peripherals',
+  filetype = 'cortex-peripheral',
+  title = 'Cortex SVD Peripherals',
+  element = 'cortex_peripherals',
+  float_width = 110,
+  float_height = 24,
+  window = {
+    position = 'right',
+    width = 60,
+    height = 18,
+    border = 'rounded',
+    focus_on_open = true,
+    min_width = 20,
+  },
+})
 
 local function setting(name)
   local cfg = core and core.config or {}
@@ -37,13 +49,30 @@ local function setting(name)
   return pcfg[name] or cfg[name]
 end
 
-local function any(tbl, keys)
-  for _, key in ipairs(keys) do
-    local value = get(tbl, key)
-    if value ~= nil then
-      return value
-    end
+local function new_telnet(config)
+  if core and core._new_peripheral_telnet then
+    return core._new_peripheral_telnet(config)
   end
+  config = config or state.session_config or {}
+  local pcfg = (core and core.config and core.config.peripheral) or {}
+  local host = config_util.get(config, 'svdTelnetHost')
+    or config_util.get(config, 'peripheralTelnetHost')
+    or config_util.get(config, 'telnetHost')
+    or config_util.get(config, 'openocdTelnetHost')
+    or pcfg.host
+    or '127.0.0.1'
+  local port = config_util.get(config, 'svdTelnetPort')
+    or config_util.get(config, 'peripheralTelnetPort')
+    or config_util.get(config, 'telnetPort')
+    or config_util.get(config, 'openocdTelnetPort')
+    or pcfg.port
+    or 4444
+  local timeout = tonumber(pcfg.timeout_ms or pcfg.timeoutMs) or 1000
+  return Telnet.new(tostring(host), tonumber(port) or 4444, timeout)
+end
+
+local function any(tbl, keys)
+  return config_util.first(tbl, keys)
 end
 
 local function placeholder(value)
@@ -91,7 +120,7 @@ local function expand_path(path, config)
     'cwd',
   })
   local workspace = resolve_dir(workspace_value, workspace_fallback())
-  local cwd = resolve_dir(get(config, 'cwd'), workspace)
+  local cwd = resolve_dir(config_util.get(config, 'cwd'), workspace)
   local replacements = {
     workspaceFolder = workspace,
     workspaceRoot = workspace,
@@ -114,12 +143,12 @@ end
 --- Resolve the SVD path from launch config or setup options.
 function P.resolve_path(config)
   config = config or state.session_config or {}
-  local path = get(config, 'svdFile')
-    or get(config, 'svdPath')
-    or get(config, 'svd_file')
-    or get(config, 'svd_path')
-    or get(get(config, 'peripheral'), 'svdFile')
-    or get(get(config, 'peripheral'), 'svdPath')
+  local path = config_util.get(config, 'svdFile')
+    or config_util.get(config, 'svdPath')
+    or config_util.get(config, 'svd_file')
+    or config_util.get(config, 'svd_path')
+    or config_util.get(config_util.get(config, 'peripheral'), 'svdFile')
+    or config_util.get(config_util.get(config, 'peripheral'), 'svdPath')
     or setting('svdFile')
     or setting('svdPath')
     or setting('svd_file')
@@ -298,9 +327,6 @@ function P.decode_register(register, response, endian)
   return result
 end
 
-P._bytes_from_response = bytes_from_response
-P._bits_value = bits_value
-
 function P.register_command(register)
   local access = tostring(register.access or ''):lower():gsub('[%s_-]', '')
   if access == 'writeonly' or access == 'writeonce' then
@@ -334,7 +360,7 @@ local function mark_text(highlights, line, source, text, group, start)
 end
 
 local function render()
-  if not (state.bufnr and api.nvim_buf_is_valid(state.bufnr)) then
+  if not pane:buf_valid() then
     return
   end
   local content_width = ui.content_width(state.bufnr, 80)
@@ -451,21 +477,6 @@ local function render()
   ui.render(state.bufnr, lines, highlights)
 end
 
-local function view_win()
-  if state.winid and api.nvim_win_is_valid(state.winid) then
-    return state.winid
-  end
-  if
-    state.element_mode
-    and state.bufnr
-    and api.nvim_buf_is_valid(state.bufnr)
-    and api.nvim_get_current_buf() == state.bufnr
-  then
-    return api.nvim_get_current_win()
-  end
-  return nil
-end
-
 local function toggle_current()
   local item = state.line_map[api.nvim_win_get_cursor(0)[1]]
   if not item then
@@ -481,74 +492,30 @@ local function toggle_current()
 end
 
 local function create_buf()
-  if state.bufnr and api.nvim_buf_is_valid(state.bufnr) then
-    return state.bufnr
+  local bufnr, created = pane:buffer()
+  if not created then
+    return bufnr
   end
-  state.bufnr = api.nvim_create_buf(false, true)
-  vim.bo[state.bufnr].buftype, vim.bo[state.bufnr].bufhidden = 'nofile', 'hide'
-  vim.bo[state.bufnr].swapfile, vim.bo[state.bufnr].filetype = false, 'cortex-peripheral'
-  pcall(api.nvim_buf_set_name, state.bufnr, 'cortex://peripherals')
-  local opts = { buffer = state.bufnr, nowait = true, silent = true }
+  local opts = { buffer = bufnr, nowait = true, silent = true }
   local function mouse_toggle()
-    local winid = view_win()
+    local winid = pane:window()
     if winid and ui.mouse_line(winid) then
       toggle_current()
     end
   end
-  local function close_from_buffer()
-    if state.element_mode then
-      local ok, dapui = pcall(require, 'dapui')
-      if ok and dapui.close then
-        dapui.close()
-      end
-    else
-      P.close()
-    end
-  end
-  vim.keymap.set('n', 'q', close_from_buffer, opts)
+  vim.keymap.set('n', 'q', function()
+    pane:close_from_buffer(P.close)
+  end, opts)
   vim.keymap.set('n', '<CR>', toggle_current, opts)
   vim.keymap.set('n', 'r', P.refresh, opts)
   vim.keymap.set('n', '<LeftMouse>', mouse_toggle, opts)
   vim.keymap.set('n', '<2-LeftMouse>', mouse_toggle, opts)
-  return state.bufnr
+  return bufnr
 end
 
-local function open_window()
-  if state.winid and api.nvim_win_is_valid(state.winid) then
-    return state.winid
-  end
-  local bufnr = create_buf()
+local function window_config()
   local peripheral_config = core and core.config and core.config.peripheral
-  local cfg = (peripheral_config and peripheral_config.window) or (core and core.config and core.config.window) or {}
-  local position, width, height = cfg.position or 'right', cfg.width or 60, cfg.height or 18
-  if position == 'float' then
-    local w = math.min(width, math.max(20, vim.o.columns - 4))
-    local h = math.min(height, math.max(5, vim.o.lines - 6))
-    state.winid = api.nvim_open_win(bufnr, true, {
-      relative = 'editor',
-      width = w,
-      height = h,
-      row = math.max(1, math.floor((vim.o.lines - h) / 2) - 1),
-      col = math.max(0, math.floor((vim.o.columns - w) / 2)),
-      style = 'minimal',
-      border = cfg.border or 'rounded',
-      title = ' Cortex SVD Peripherals ',
-      title_pos = 'center',
-    })
-  else
-    local command = position == 'left' and ('topleft vertical ' .. width .. 'split')
-      or position == 'bottom' and ('botright ' .. height .. 'split')
-      or position == 'top' and ('topleft ' .. height .. 'split')
-      or ('botright vertical ' .. width .. 'split')
-    vim.cmd(command)
-    state.winid = api.nvim_get_current_win()
-    api.nvim_win_set_buf(state.winid, bufnr)
-  end
-  vim.wo[state.winid].number = false
-  vim.wo[state.winid].relativenumber = false
-  vim.wo[state.winid].wrap = false
-  vim.wo[state.winid].signcolumn = 'no'
-  return state.winid
+  return (peripheral_config and peripheral_config.window) or (core and core.config and core.config.window)
 end
 
 function P.open()
@@ -556,62 +523,46 @@ function P.open()
     P.load(state.session_config or {})
   end
   create_buf()
-  if state.element_mode then
-    render()
-    return state.bufnr
+  if not state.element_mode then
+    pane:open(window_config())
   end
-  open_window()
   render()
   return state.bufnr
 end
 
-function P.close()
+local function before_close()
   if state.cancel_refresh then
     state.cancel_refresh('view closed')
   end
   close_telnet()
-  if state.element_mode then
-    return
-  end
-  if state.winid and api.nvim_win_is_valid(state.winid) then
-    pcall(api.nvim_win_close, state.winid, true)
-  end
-  state.winid = nil
+end
+
+function P.close()
+  before_close()
+  pane:close()
 end
 
 function P.toggle()
-  if state.element_mode then
-    local ok, dapui = pcall(require, 'dapui')
-    if ok and dapui.float_element then
-      dapui.float_element('cortex_peripherals', { width = 110, height = 24, enter = true })
-    end
-    return
+  if pane:win_valid() then
+    before_close()
+  elseif not state.element_mode and not state.model then
+    P.load(state.session_config or {})
   end
-  if state.winid and api.nvim_win_is_valid(state.winid) then
-    P.close()
-  else
-    P.open()
+  create_buf()
+  local action = pane:toggle(window_config())
+  if action == 'opened' then
+    render()
   end
 end
 
----Register this tree as an nvim-dap-ui layout element.
 function P.element()
-  state.element_mode = true
   create_buf()
+  local element = pane:element(render, create_buf)
   if not state.model and state.session_config then
     P.load(state.session_config)
   end
   render()
-  return {
-    buffer = function()
-      return create_buf()
-    end,
-    render = render,
-    allow_without_session = true,
-    float_defaults = function()
-      return { width = 110, height = 24, enter = true, title = 'Cortex SVD Peripherals' }
-    end,
-  }
+  return element
 end
 
 --- Refresh register values. This is deliberately rejected unless stopped.
@@ -639,19 +590,14 @@ function P.refresh(callback)
   end
   local config = state.session_config or {}
   close_telnet()
-  local tel = core and core._new_peripheral_telnet and core._new_peripheral_telnet(config)
-  if not tel then
-    state.status, state.error = 'error', 'peripheral Telnet client unavailable'
-    render()
-    return nil, state.error
-  end
+  local tel = new_telnet(config)
   state.generation = state.generation + 1
   local generation = state.generation
   state.telnet, state.refreshing, state.status = tel, true, 'connecting'
   local registers = {}
   local pcfg = (core and core.config and core.config.peripheral) or {}
   local read_all = pcfg.read_all or pcfg.readAll
-  local has_window = state.bufnr and api.nvim_buf_is_valid(state.bufnr)
+  local has_window = pane:buf_valid()
   for _, peripheral in ipairs(state.model.peripherals or {}) do
     -- A real SVD can contain thousands of registers. In the browser, read
     -- only expanded peripherals by default; headless/API callers can request
