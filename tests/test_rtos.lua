@@ -78,8 +78,12 @@ local core = {
       auto_refresh_on_stop = false,
     },
   },
-  _is_stopped = function() return current end,
-  _stopped_session = function() return current and session or nil end,
+  _is_stopped = function()
+    return current
+  end,
+  _stopped_session = function()
+    return current and session or nil
+  end,
 }
 rtos.setup(core)
 rtos.on_session_start({ rtos = { enabled = true } })
@@ -92,7 +96,9 @@ check('refresh succeeds', result == nil and result_data ~= nil)
 check('task count is reported', result_data and result_data.task_count == 2)
 check('two tasks found', result_data and #result_data.tasks == 2)
 local by_name = {}
-for _, task in ipairs(result_data and result_data.tasks or {}) do by_name[task.name] = task end
+for _, task in ipairs(result_data and result_data.tasks or {}) do
+  by_name[task.name] = task
+end
 check('running task found', by_name.worker and by_name.worker.state == 'Running' and by_name.worker.running)
 check('blocked task found', by_name.blocked and by_name.blocked.state == 'Blocked')
 check('priority decoded', by_name.worker and by_name.worker.priority == 4)
@@ -104,7 +110,9 @@ check('GDB octal string cleanup', rtos._parse_name('"worker\\000\\000"') == 'wor
 
 current = false
 local running_error
-rtos.refresh(function(err) running_error = err end)
+rtos.refresh(function(err)
+  running_error = err
+end)
 check('running refresh rejected', running_error == 'target must be stopped')
 check('running status shown', rtos._state.status == 'target running (refresh skipped)')
 
@@ -117,16 +125,24 @@ function async_session:evaluate(_, callback)
   evaluate_calls = evaluate_calls + 1
   pending_callback = callback
 end
-core._stopped_session = function() return current and async_session or nil end
+core._stopped_session = function()
+  return current and async_session or nil
+end
 rtos.on_session_start({ rtos = { enabled = true, maxPriorities = 2 } })
 local cancelled_error
-rtos.refresh(function(err) cancelled_error = err end)
+rtos.refresh(function(err)
+  cancelled_error = err
+end)
 current = false
 rtos.on_session_continued()
 check('resume cancels delayed refresh', cancelled_error == 'target resumed')
 local calls_before_late_response = evaluate_calls
-if pending_callback then pending_callback(nil, { result = '2' }) end
+if pending_callback then
+  pending_callback(nil, { result = '2' })
+end
 check('late response sends no follow-up evaluation', evaluate_calls == calls_before_late_response)
 
 io.write(string.format('%d/%d RTOS checks passed\n', checks - failures, checks))
-if failures > 0 then os.exit(1) end
+if failures > 0 then
+  os.exit(1)
+end

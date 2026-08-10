@@ -27,6 +27,14 @@ echo "== unit tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_adapter.lua"
 
 echo
+echo "== OpenOCD telnet transport tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_telnet.lua"
+
+echo
+echo "== shared UI helper tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_ui.lua"
+
+echo
 echo "== persistent target tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_target.lua"
 

@@ -40,7 +40,9 @@ end
 local function any(tbl, keys)
   for _, key in ipairs(keys) do
     local value = get(tbl, key)
-    if value ~= nil then return value end
+    if value ~= nil then
+      return value
+    end
   end
 end
 
@@ -51,30 +53,42 @@ end
 local function workspace_fallback()
   local path = vim.fs.normalize(vim.fn.getcwd())
   while path and path ~= '' do
-    if vim.fn.filereadable(path .. '/.vscode/launch.json') == 1
-        or vim.fn.isdirectory(path .. '/.git') == 1 then
+    if vim.fn.filereadable(path .. '/.vscode/launch.json') == 1 or vim.fn.isdirectory(path .. '/.git') == 1 then
       return path
     end
     local parent = vim.fs.dirname(path)
-    if parent == path then break end
+    if parent == path then
+      break
+    end
     path = parent
   end
   return vim.fs.normalize(vim.fn.getcwd())
 end
 
 local function resolve_dir(value, fallback)
-  if type(value) ~= 'string' or vim.trim(value) == '' or placeholder(value) then return fallback end
+  if type(value) ~= 'string' or vim.trim(value) == '' or placeholder(value) then
+    return fallback
+  end
   value = vim.fn.expand(value)
-  if not value:match('^/') then value = fallback .. '/' .. value end
+  if not value:match('^/') then
+    value = fallback .. '/' .. value
+  end
   return vim.fs.normalize(value)
 end
 
 local function expand_path(path, config)
-  if type(path) ~= 'string' or vim.trim(path) == '' then return nil end
+  if type(path) ~= 'string' or vim.trim(path) == '' then
+    return nil
+  end
   config = config or state.session_config or {}
   local workspace_value = any(config, {
-    'workspaceRoot', 'workspaceroot', 'workspace_root',
-    'workspaceFolder', 'workspacefolder', 'workspace_folder', 'cwd',
+    'workspaceRoot',
+    'workspaceroot',
+    'workspace_root',
+    'workspaceFolder',
+    'workspacefolder',
+    'workspace_folder',
+    'cwd',
   })
   local workspace = resolve_dir(workspace_value, workspace_fallback())
   local cwd = resolve_dir(get(config, 'cwd'), workspace)
@@ -91,19 +105,25 @@ local function expand_path(path, config)
     return tostring(replacements[key] or replacements[key:lower()] or '${' .. key .. '}')
   end)
   path = vim.fn.expand(path)
-  if not path:match('^/') then path = cwd .. '/' .. path end
+  if not path:match('^/') then
+    path = cwd .. '/' .. path
+  end
   return vim.fs.normalize(path)
 end
 
 --- Resolve the SVD path from launch config or setup options.
 function P.resolve_path(config)
   config = config or state.session_config or {}
-  local path = get(config, 'svdFile') or get(config, 'svdPath')
-    or get(config, 'svd_file') or get(config, 'svd_path')
+  local path = get(config, 'svdFile')
+    or get(config, 'svdPath')
+    or get(config, 'svd_file')
+    or get(config, 'svd_path')
     or get(get(config, 'peripheral'), 'svdFile')
     or get(get(config, 'peripheral'), 'svdPath')
-    or setting('svdFile') or setting('svdPath')
-    or setting('svd_file') or setting('svd_path')
+    or setting('svdFile')
+    or setting('svdPath')
+    or setting('svd_file')
+    or setting('svd_path')
   return expand_path(path, config)
 end
 
@@ -129,14 +149,18 @@ function P.load(config)
   -- A reload must not retain expansion state for peripherals that disappeared.
   local expanded = {}
   for name, value in pairs(state.expanded) do
-    if model.peripherals_by_name[name] then expanded[name] = value end
+    if model.peripherals_by_name[name] then
+      expanded[name] = value
+    end
   end
   state.expanded = expanded
   return model
 end
 
 local function current(generation, tel)
-  return state.generation == generation and state.telnet == tel and core
+  return state.generation == generation
+    and state.telnet == tel
+    and core
     and (not core._is_stopped or core._is_stopped())
 end
 
@@ -151,8 +175,12 @@ local function bytes_from_response(response)
           bytes[#bytes + 1] = tonumber(token, 16)
         elseif #token > 2 and token:match('^%x+$') then
           -- Be liberal for fake telnet servers and mdw-style replies.
-          if #token % 2 == 1 then token = '0' .. token end
-          for i = 1, #token, 2 do bytes[#bytes + 1] = tonumber(token:sub(i, i + 1), 16) end
+          if #token % 2 == 1 then
+            token = '0' .. token
+          end
+          for i = 1, #token, 2 do
+            bytes[#bytes + 1] = tonumber(token:sub(i, i + 1), 16)
+          end
         end
       end
     end
@@ -163,27 +191,34 @@ end
 -- Return bytes in least-significant-byte first order for bit extraction.
 local function logical_bytes(bytes, endian)
   local result = {}
-  for i, byte in ipairs(bytes) do result[i] = byte end
-  if not tostring(endian or 'little'):lower():match('big') then return result end
+  for i, byte in ipairs(bytes) do
+    result[i] = byte
+  end
+  if not tostring(endian or 'little'):lower():match('big') then
+    return result
+  end
   local reversed = {}
-  for i = #result, 1, -1 do reversed[#reversed + 1] = result[i] end
+  for i = #result, 1, -1 do
+    reversed[#reversed + 1] = result[i]
+  end
   return reversed
 end
 
-local function display_bytes(logical, endian)
-  if tostring(endian or 'little'):lower():match('big') then
-    local result = {}
-    for i = #logical, 1, -1 do result[#result + 1] = logical[i] end
-    return result
-  end
+local function display_bytes(logical)
+  -- `logical` is least-significant byte first for both target endiannesses;
+  -- reverse it once to produce the conventional most-significant-first hex.
   local result = {}
-  for i = #logical, 1, -1 do result[#result + 1] = logical[i] end
+  for i = #logical, 1, -1 do
+    result[#result + 1] = logical[i]
+  end
   return result
 end
 
 local function hex_bytes(bytes)
   local out = {}
-  for _, byte in ipairs(bytes) do out[#out + 1] = string.format('%02x', byte) end
+  for _, byte in ipairs(bytes) do
+    out[#out + 1] = string.format('%02x', byte)
+  end
   return table.concat(out)
 end
 
@@ -198,18 +233,22 @@ local function bits_value(bytes, offset, width)
 end
 
 local function number_hex(value, width)
-  if width <= 32 then return string.format('0x%0' .. math.ceil(width / 4) .. 'x', value) end
+  if width <= 32 then
+    return string.format('0x%0' .. math.ceil(width / 4) .. 'x', value)
+  end
   return nil
 end
 
-local function mask_hex(offset, width, register_width, endian)
+local function mask_hex(offset, width, register_width)
   local bytes = {}
-  for i = 1, math.max(1, math.ceil(register_width / 8)) do bytes[i] = 0 end
+  for i = 1, math.max(1, math.ceil(register_width / 8)) do
+    bytes[i] = 0
+  end
   for bit = offset, offset + width - 1 do
     local index = math.floor(bit / 8) + 1
     bytes[index] = bytes[index] + 2 ^ (bit % 8)
   end
-  return '0x' .. hex_bytes(display_bytes(bytes, endian))
+  return '0x' .. hex_bytes(display_bytes(bytes))
 end
 
 --- Decode an OpenOCD memory response according to register width/endianness.
@@ -221,14 +260,16 @@ function P.decode_register(register, response, endian)
   if #physical < byte_count then
     return nil, string.format('incomplete memory response (%d/%d bytes)', #physical, byte_count)
   end
-  while #physical > byte_count do table.remove(physical) end
+  while #physical > byte_count do
+    table.remove(physical)
+  end
   local logical = logical_bytes(physical, endian)
   local value = bits_value(logical, 0, math.min(width, 53))
   local result = {
     value = value,
     width = width,
     bytes = physical,
-    hex = '0x' .. hex_bytes(display_bytes(logical, endian)),
+    hex = '0x' .. hex_bytes(display_bytes(logical)),
     fields = {},
   }
   for _, field in ipairs(register.fields or {}) do
@@ -236,15 +277,20 @@ function P.decode_register(register, response, endian)
     if offset and field_width and field_width > 0 then
       local field_value = bits_value(logical, offset, math.min(field_width, 53))
       local mask
-      if field_width + offset <= 32 then mask = (2 ^ field_width - 1) * 2 ^ offset end
+      if field_width + offset <= 32 then
+        mask = (2 ^ field_width - 1) * 2 ^ offset
+      end
       local enum_name
       for _, enum in ipairs(field.enumeratedValues or {}) do
-        if enum.value ~= nil and enum.value == field_value then enum_name = enum.name; break end
+        if enum.value ~= nil and enum.value == field_value then
+          enum_name = enum.name
+          break
+        end
       end
       result.fields[field.name] = {
         value = field_value,
         hex = number_hex(field_value, field_width),
-        mask = mask and number_hex(mask, 32) or mask_hex(offset, field_width, width, endian),
+        mask = mask and number_hex(mask, 32) or mask_hex(offset, field_width, width),
         enum = enum_name,
       }
     end
@@ -265,40 +311,136 @@ function P.register_command(register)
 end
 
 local function close_telnet()
-  if state.telnet then state.telnet:close(); state.telnet = nil end
+  if state.telnet then
+    state.telnet:close()
+    state.telnet = nil
+  end
+end
+
+local function mark_text(highlights, line, source, text, group, start)
+  if not text or text == '' then
+    return
+  end
+  local at = source:find(text, start or 1, true)
+  if not at then
+    return
+  end
+  highlights[#highlights + 1] = {
+    line = line,
+    group = group,
+    start = at - 1,
+    finish = at - 1 + #text,
+  }
 end
 
 local function render()
-  if not (state.bufnr and api.nvim_buf_is_valid(state.bufnr)) then return end
-  local lines = { string.format('Cortex SVD Peripherals  [%s]%s', state.status,
-    state.path and ('  ' .. state.path) or ''), string.rep('─', 40) }
+  if not (state.bufnr and api.nvim_buf_is_valid(state.bufnr)) then
+    return
+  end
+  local content_width = ui.content_width(state.bufnr, 80)
+  local item_width = math.max(10, math.min(26, math.floor((content_width - 16) * 0.55)))
+  local value_width = math.max(6, content_width - item_width - 16)
+  local icon, status_group = ui.status_icon(state.status)
+  local shown_path = state.path and vim.fn.fnamemodify(state.path, ':~') or '(not configured)'
+  local status = ui.truncate(state.status, math.max(8, content_width - 6))
+  local path = ui.truncate(shown_path, math.max(8, content_width - 6))
+  local item_header = ui.truncate('Peripheral / Register', item_width)
+  local lines = {
+    'Cortex SVD Peripherals',
+    string.format('  %s  %s', icon, status),
+    '  SVD  ' .. path,
+    string.format('  %-' .. item_width .. 's  %-10s  %s', item_header, 'Address', ui.truncate('Value', value_width)),
+    '  ' .. string.rep('─', content_width),
+  }
+  local highlights = {
+    { line = 1, group = 'CortexTitle' },
+    { line = 2, group = status_group, start = 2, finish = -1 },
+    { line = 3, group = 'CortexDim' },
+    { line = 4, group = 'CortexHeader' },
+    { line = 5, group = 'CortexSeparator' },
+  }
   local map = {}
-  if state.error then lines[#lines + 1] = 'Error: ' .. state.error end
+  local function add_line(text, item, group)
+    lines[#lines + 1] = text
+    if item then
+      map[#lines] = item
+    end
+    if group then
+      ui.highlight_line(highlights, #lines, group)
+    end
+    return #lines
+  end
+  if state.error then
+    add_line('  ✖ ' .. ui.truncate(state.error, content_width - 4), nil, 'CortexError')
+  end
   if not state.model then
-    lines[#lines + 1] = '(no SVD loaded)'
+    add_line('  (no SVD loaded)', nil, 'CortexDim')
   else
     for _, peripheral in ipairs(state.model.peripherals or {}) do
       local open = state.expanded[peripheral.name]
-      lines[#lines + 1] = (open and '▾ ' or '▸ ') .. peripheral.name .. string.format('  0x%08x', peripheral.baseAddress or 0)
-      map[#lines] = { kind = 'peripheral', peripheral = peripheral }
+      local address = string.format('0x%08x', peripheral.baseAddress or 0)
+      local name = ui.truncate(peripheral.name, item_width - 2)
+      local line_text = string.format(
+        '  %s %-' .. (item_width - 2) .. 's  %-10s  %s',
+        open and '▾' or '▸',
+        name,
+        address,
+        ui.truncate('', value_width)
+      )
+      local line = add_line(line_text, { kind = 'peripheral', peripheral = peripheral }, 'CortexName')
+      mark_text(highlights, line, line_text, address, 'CortexAddress')
       if open then
         for _, register in ipairs(peripheral.registers or {}) do
           local key = peripheral.name .. '.' .. register.name
           local ropen = state.expanded[key]
           local value = register.read_error and ('<' .. register.read_error .. '>')
             or (register.decoded and register.decoded.hex or '<not read>')
-          if register.readAction then value = value .. ' !' .. register.readAction end
-          lines[#lines + 1] = '  ' .. (ropen and '▾ ' or '▸ ') .. register.name
-            .. string.format('  +0x%x  %s', register.addressOffset or 0, value)
-          map[#lines] = { kind = 'register', peripheral = peripheral, register = register }
+          if register.readAction then
+            value = value .. ' !' .. register.readAction
+          end
+          local register_name = ui.truncate(register.name, item_width - 6)
+          local register_value = ui.truncate(value, value_width)
+          local register_line = string.format(
+            '      %s %-' .. (item_width - 6) .. 's  +0x%04x  %s',
+            ropen and '▾' or '▸',
+            register_name,
+            register.addressOffset or 0,
+            register_value
+          )
+          local rline = add_line(
+            register_line,
+            { kind = 'register', peripheral = peripheral, register = register },
+            register.read_error and 'CortexError' or 'CortexName'
+          )
+          mark_text(
+            highlights,
+            rline,
+            register_line,
+            register_value,
+            register.read_error and 'CortexError' or 'CortexValue'
+          )
           if ropen then
             for _, field in ipairs(register.fields or {}) do
               local decoded = register.decoded and register.decoded.fields[field.name]
               local shown = decoded and (decoded.hex or tostring(decoded.value)) or '<not read>'
-              if decoded and decoded.enum then shown = shown .. ' (' .. decoded.enum .. ')' end
-              lines[#lines + 1] = string.format('      %s [%s] = %s', field.name,
-                decoded and decoded.mask or string.format('[%d:%d]', (field.msb or 0), (field.lsb or 0)), shown)
-              map[#lines] = { kind = 'field', peripheral = peripheral, register = register, field = field }
+              if decoded and decoded.enum then
+                shown = shown .. ' (' .. decoded.enum .. ')'
+              end
+              local bits = decoded and decoded.mask or string.format('[%d:%d]', (field.msb or 0), (field.lsb or 0))
+              local field_name = ui.truncate(field.name, math.max(6, item_width - 10))
+              local field_value = ui.truncate(shown, value_width)
+              local field_line = string.format(
+                '          %-' .. math.max(6, item_width - 10) .. 's  %-10s  %s',
+                field_name,
+                ui.truncate(bits, 10),
+                field_value
+              )
+              local fline = add_line(
+                field_line,
+                { kind = 'field', peripheral = peripheral, register = register, field = field },
+                'CortexDim'
+              )
+              mark_text(highlights, fline, field_line, field_value, decoded and 'CortexValue' or 'CortexDim')
             end
           end
         end
@@ -306,15 +448,19 @@ local function render()
     end
   end
   state.line_map = map
-  vim.bo[state.bufnr].modifiable = true
-  api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
-  vim.bo[state.bufnr].modifiable = false
+  ui.render(state.bufnr, lines, highlights)
 end
 
 local function view_win()
-  if state.winid and api.nvim_win_is_valid(state.winid) then return state.winid end
-  if state.element_mode and state.bufnr and api.nvim_buf_is_valid(state.bufnr)
-      and api.nvim_get_current_buf() == state.bufnr then
+  if state.winid and api.nvim_win_is_valid(state.winid) then
+    return state.winid
+  end
+  if
+    state.element_mode
+    and state.bufnr
+    and api.nvim_buf_is_valid(state.bufnr)
+    and api.nvim_get_current_buf() == state.bufnr
+  then
     return api.nvim_get_current_win()
   end
   return nil
@@ -322,7 +468,9 @@ end
 
 local function toggle_current()
   local item = state.line_map[api.nvim_win_get_cursor(0)[1]]
-  if not item then return end
+  if not item then
+    return
+  end
   if item.kind == 'peripheral' then
     state.expanded[item.peripheral.name] = not state.expanded[item.peripheral.name]
   elseif item.kind == 'register' then
@@ -333,7 +481,9 @@ local function toggle_current()
 end
 
 local function create_buf()
-  if state.bufnr and api.nvim_buf_is_valid(state.bufnr) then return state.bufnr end
+  if state.bufnr and api.nvim_buf_is_valid(state.bufnr) then
+    return state.bufnr
+  end
   state.bufnr = api.nvim_create_buf(false, true)
   vim.bo[state.bufnr].buftype, vim.bo[state.bufnr].bufhidden = 'nofile', 'hide'
   vim.bo[state.bufnr].swapfile, vim.bo[state.bufnr].filetype = false, 'cortex-peripheral'
@@ -341,12 +491,16 @@ local function create_buf()
   local opts = { buffer = state.bufnr, nowait = true, silent = true }
   local function mouse_toggle()
     local winid = view_win()
-    if winid and ui.mouse_line(winid) then toggle_current() end
+    if winid and ui.mouse_line(winid) then
+      toggle_current()
+    end
   end
   local function close_from_buffer()
     if state.element_mode then
       local ok, dapui = pcall(require, 'dapui')
-      if ok and dapui.close then dapui.close() end
+      if ok and dapui.close then
+        dapui.close()
+      end
     else
       P.close()
     end
@@ -360,45 +514,68 @@ local function create_buf()
 end
 
 local function open_window()
-  if state.winid and api.nvim_win_is_valid(state.winid) then return state.winid end
+  if state.winid and api.nvim_win_is_valid(state.winid) then
+    return state.winid
+  end
   local bufnr = create_buf()
-  local cfg = (core and core.config and (core.config.peripheral_window or core.config.window)) or {}
+  local peripheral_config = core and core.config and core.config.peripheral
+  local cfg = (peripheral_config and peripheral_config.window) or (core and core.config and core.config.window) or {}
   local position, width, height = cfg.position or 'right', cfg.width or 60, cfg.height or 18
   if position == 'float' then
     local w = math.min(width, math.max(20, vim.o.columns - 4))
     local h = math.min(height, math.max(5, vim.o.lines - 6))
-    state.winid = api.nvim_open_win(bufnr, true, { relative = 'editor', width = w, height = h,
-      row = math.max(1, math.floor((vim.o.lines - h) / 2) - 1), col = math.max(0, math.floor((vim.o.columns - w) / 2)),
-      style = 'minimal', border = cfg.border or 'rounded', title = ' Cortex SVD Peripherals ', title_pos = 'center' })
+    state.winid = api.nvim_open_win(bufnr, true, {
+      relative = 'editor',
+      width = w,
+      height = h,
+      row = math.max(1, math.floor((vim.o.lines - h) / 2) - 1),
+      col = math.max(0, math.floor((vim.o.columns - w) / 2)),
+      style = 'minimal',
+      border = cfg.border or 'rounded',
+      title = ' Cortex SVD Peripherals ',
+      title_pos = 'center',
+    })
   else
     local command = position == 'left' and ('topleft vertical ' .. width .. 'split')
       or position == 'bottom' and ('botright ' .. height .. 'split')
       or position == 'top' and ('topleft ' .. height .. 'split')
       or ('botright vertical ' .. width .. 'split')
     vim.cmd(command)
-    state.winid = api.nvim_get_current_win(); api.nvim_win_set_buf(state.winid, bufnr)
+    state.winid = api.nvim_get_current_win()
+    api.nvim_win_set_buf(state.winid, bufnr)
   end
-  vim.wo[state.winid].number = false; vim.wo[state.winid].relativenumber = false; vim.wo[state.winid].wrap = false
+  vim.wo[state.winid].number = false
+  vim.wo[state.winid].relativenumber = false
+  vim.wo[state.winid].wrap = false
   vim.wo[state.winid].signcolumn = 'no'
   return state.winid
 end
 
 function P.open()
-  if not state.model then P.load(state.session_config or {}) end
+  if not state.model then
+    P.load(state.session_config or {})
+  end
   create_buf()
   if state.element_mode then
     render()
     return state.bufnr
   end
-  open_window(); render()
+  open_window()
+  render()
   return state.bufnr
 end
 
 function P.close()
-  if state.cancel_refresh then state.cancel_refresh('view closed') end
+  if state.cancel_refresh then
+    state.cancel_refresh('view closed')
+  end
   close_telnet()
-  if state.element_mode then return end
-  if state.winid and api.nvim_win_is_valid(state.winid) then pcall(api.nvim_win_close, state.winid, true) end
+  if state.element_mode then
+    return
+  end
+  if state.winid and api.nvim_win_is_valid(state.winid) then
+    pcall(api.nvim_win_close, state.winid, true)
+  end
   state.winid = nil
 end
 
@@ -410,17 +587,25 @@ function P.toggle()
     end
     return
   end
-  if state.winid and api.nvim_win_is_valid(state.winid) then P.close() else P.open() end
+  if state.winid and api.nvim_win_is_valid(state.winid) then
+    P.close()
+  else
+    P.open()
+  end
 end
 
 ---Register this tree as an nvim-dap-ui layout element.
 function P.element()
   state.element_mode = true
   create_buf()
-  if not state.model and state.session_config then P.load(state.session_config) end
+  if not state.model and state.session_config then
+    P.load(state.session_config)
+  end
   render()
   return {
-    buffer = function() return create_buf() end,
+    buffer = function()
+      return create_buf()
+    end,
     render = render,
     allow_without_session = true,
     float_defaults = function()
@@ -431,22 +616,34 @@ end
 
 --- Refresh register values. This is deliberately rejected unless stopped.
 function P.refresh(callback)
-  if state.cancel_refresh then state.cancel_refresh('refresh superseded') end
+  if state.cancel_refresh then
+    state.cancel_refresh('refresh superseded')
+  end
   if core and core._is_stopped and not core._is_stopped() then
-    state.status = 'target running (refresh skipped)'; render()
-    if callback then callback('target must be stopped') end
+    state.status = 'target running (refresh skipped)'
+    render()
+    if callback then
+      callback('target must be stopped')
+    end
     return nil, 'target must be stopped'
   end
   if not state.model then
     local _, err = P.load(state.session_config)
-    if err then if callback then callback(err) end; render(); return nil, err end
+    if err then
+      if callback then
+        callback(err)
+      end
+      render()
+      return nil, err
+    end
   end
   local config = state.session_config or {}
   close_telnet()
   local tel = core and core._new_peripheral_telnet and core._new_peripheral_telnet(config)
   if not tel then
     state.status, state.error = 'error', 'peripheral Telnet client unavailable'
-    render(); return nil, state.error
+    render()
+    return nil, state.error
   end
   state.generation = state.generation + 1
   local generation = state.generation
@@ -460,17 +657,25 @@ function P.refresh(callback)
     -- only expanded peripherals by default; headless/API callers can request
     -- the complete model with peripheral.read_all = true.
     if read_all or not has_window or state.expanded[peripheral.name] then
-      for _, register in ipairs(peripheral.registers or {}) do registers[#registers + 1] = register end
+      for _, register in ipairs(peripheral.registers or {}) do
+        registers[#registers + 1] = register
+      end
     end
   end
   local index = 0
   local finished = false
   local function cancel(err)
-    if finished then return end
+    if finished then
+      return
+    end
     finished = true
-    if state.cancel_refresh == cancel then state.cancel_refresh = nil end
+    if state.cancel_refresh == cancel then
+      state.cancel_refresh = nil
+    end
     state.refreshing = false
-    if callback then callback(err) end
+    if callback then
+      callback(err)
+    end
   end
   state.cancel_refresh = cancel
   local function done(err)
@@ -490,7 +695,10 @@ function P.refresh(callback)
       done('target resumed')
       return
     end
-    if index >= #registers then done(nil); return end
+    if index >= #registers then
+      done(nil)
+      return
+    end
     if not core._is_stopped() then
       close_telnet()
       state.status = 'target running (refresh skipped)'
@@ -529,14 +737,19 @@ function P.refresh(callback)
       done('target resumed')
       return
     end
-    if err then done(err); return end
+    if err then
+      done(err)
+      return
+    end
     next_register()
   end)
   return true
 end
 
 function P.on_session_start(config)
-  if state.cancel_refresh then state.cancel_refresh('new session') end
+  if state.cancel_refresh then
+    state.cancel_refresh('new session')
+  end
   state.generation = state.generation + 1
   close_telnet()
   state.session_config = config or {}
@@ -546,7 +759,9 @@ function P.on_session_start(config)
 end
 
 function P.on_session_continued()
-  if state.cancel_refresh then state.cancel_refresh('target resumed') end
+  if state.cancel_refresh then
+    state.cancel_refresh('target resumed')
+  end
   state.generation = state.generation + 1
   close_telnet()
   state.refreshing = false
@@ -563,7 +778,9 @@ function P.on_session_stopped()
 end
 
 function P.on_session_end()
-  if state.cancel_refresh then state.cancel_refresh('session ended') end
+  if state.cancel_refresh then
+    state.cancel_refresh('session ended')
+  end
   state.generation = state.generation + 1
   close_telnet()
   state.session_config, state.model, state.path = nil, nil, nil

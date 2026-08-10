@@ -7,7 +7,8 @@ local svd = require('cortex.svd')
 local failures, total = 0, 0
 local function check(name, ok, detail)
   total = total + 1
-  if ok then io.stdout:write('ok   ' .. name .. '\n')
+  if ok then
+    io.stdout:write('ok   ' .. name .. '\n')
   else
     failures = failures + 1
     io.stdout:write('FAIL ' .. name .. (detail and ('\n     ' .. tostring(detail)) or '') .. '\n')
@@ -39,7 +40,11 @@ eq('derived register inherited field', derived and #derived.registers_by_name.ST
 local clustered = model and model.peripherals_by_name.CLUSTERED
 check('cluster dimensions flattened', clustered and #clustered.registers == 4)
 eq('clustered register address', clustered and clustered.registers_by_name['CHB.VALUE'].address, 0x60000024)
-eq('derived cluster register address', clustered and clustered.registers_by_name['CLDERIVED.VALUE2'].address, 0x60000064)
+eq(
+  'derived cluster register address',
+  clustered and clustered.registers_by_name['CLDERIVED.VALUE2'].address,
+  0x60000064
+)
 
 local qualified_xml = [[
 <device><name>UnitDevice</name><addressUnitBits>16</addressUnitBits><peripherals>
@@ -49,8 +54,11 @@ local qualified_xml = [[
 </registers></peripheral></peripherals></device>]]
 local unit_model, unit_err = svd.parse(qualified_xml)
 local unit_peripheral = unit_model and unit_model.peripherals_by_name.P
-check('addressUnitBits scales addresses', unit_peripheral and unit_peripheral.baseAddress == 0x20
-  and unit_peripheral.registers_by_name.B.address == 0x24, unit_err)
+check(
+  'addressUnitBits scales addresses',
+  unit_peripheral and unit_peripheral.baseAddress == 0x20 and unit_peripheral.registers_by_name.B.address == 0x24,
+  unit_err
+)
 eq('qualified field derivedFrom', unit_peripheral and unit_peripheral.registers_by_name.B.fields_by_name.Y.bitOffset, 3)
 
 local callback_model, callback_err

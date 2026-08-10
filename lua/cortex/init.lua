@@ -6,23 +6,17 @@
 --- "Live Watch" implementation that talks to the OpenOCD telnet server over
 --- TCP (libuv, no dependencies).
 ---
---- Usage:
----   require('cortex').setup({})
----
---- Public API:
----   require('cortex').setup(opts)
----   require('cortex').toggle()      -- :CortexDebugWatch
----   require('cortex').add(expr)     -- :CortexDebugWatchAdd
----   require('cortex').clear()       -- :CortexDebugWatchClear
----   require('cortex').telnet(cmd)   -- :CortexDebugTelnet
----   require('cortex').rtos_toggle() -- :CortexDebugRTOS
----   require('cortex').callstack_toggle() -- :CortexDebugCallStack
----
---- Only Neovim/libuv APIs are used; nvim-dap is required lazily and only for
---- the adapter registration and symbol resolution.
+--- Call `require('cortex').setup({})` to register the adapter, listeners, and
+--- user commands. See the README for the supported setup options and Lua API.
+--- nvim-dap is loaded lazily and used only for adapter registration and symbol
+--- resolution; the OpenOCD transport itself depends only on Neovim/libuv.
 
 local api = vim.api
 local uv = vim.uv or vim.loop
+local callstack = require('cortex.callstack')
+local peripheral = require('cortex.peripheral')
+local rtos = require('cortex.rtos')
+local target = require('cortex.target')
 local ui = require('cortex.ui')
 
 local M = {}
@@ -58,6 +52,7 @@ local defaults = {
     port = 4444,
     timeout_ms = 1000,
     read_all = false, -- otherwise refresh only expanded peripherals
+    window = nil,
   },
 
   -- FreeRTOS task browser. It uses stopped DAP/GDB evaluations and never
@@ -121,6 +116,9 @@ local defaults = {
 ---@type cortex.Config
 M.config = vim.deepcopy(defaults)
 
+---@type table|nil
+local active_session_config
+
 ----------------------------------------------------------------------------
 -- Small helpers
 ----------------------------------------------------------------------------
@@ -176,403 +174,33 @@ local function tbl_get(tbl, key)
 end
 
 ----------------------------------------------------------------------------
--- Telnet (OpenOCD monitor) client -- raw TCP via libuv
+-- OpenOCD monitor transport
 ----------------------------------------------------------------------------
 
---- OpenOCD's telnet server is a line oriented protocol which echoes the input
---- and terminates every answer with the `> ` prompt. It may (depending on the
---- version) send a few IAC option bytes on connect, which we strip.
----@class cortex.Telnet
-local Telnet = {}
-Telnet.__index = Telnet
-
-local IAC = 255
-
----Strip telnet IAC command sequences from a raw chunk. The returned tail is
----an incomplete negotiation sequence that must be prepended to the next TCP
----chunk; libuv is allowed to split any byte boundary.
----@param s string
----@param pending string|nil
----@return string clean, string tail
-local function strip_iac(s, pending)
-  s = (pending or '') .. (s or '')
-  if not s:find(string.char(IAC), 1, true) then
-    return s, ''
-  end
-  local out, i, n = {}, 1, #s
-  while i <= n do
-    local b = s:byte(i)
-    if b == IAC then
-      local cmd = s:byte(i + 1)
-      if cmd == nil then
-        return table.concat(out), s:sub(i)
-      elseif cmd == IAC then -- escaped 0xFF
-        out[#out + 1] = string.char(IAC)
-        i = i + 2
-      elseif cmd >= 251 and cmd <= 254 then -- WILL/WONT/DO/DONT <opt>
-        if i + 2 > n then return table.concat(out), s:sub(i) end
-        i = i + 3
-      elseif cmd == 250 then -- SB ... IAC SE
-        local j = s:find(string.char(IAC, 240), i + 2, true)
-        if not j then return table.concat(out), s:sub(i) end
-        i = j + 2
-      else
-        if i + 1 > n then return table.concat(out), s:sub(i) end
-        i = i + 2
-      end
-    else
-      out[#out + 1] = string.char(b)
-      i = i + 1
-    end
-  end
-  return table.concat(out), ''
-end
-
----@param host string
----@param port integer
----@param timeout_ms integer
----@return cortex.Telnet
-function Telnet.new(host, port, timeout_ms)
-  return setmetatable({
-    host = host,
-    port = port,
-    timeout_ms = timeout_ms or 1000,
-    queue = {},
-    pending = nil,
-    rx = '',
-    ready = false,
-    connected = false,
-    connecting = false,
-    closed = false,
-    connect_generation = 0,
-    iac_pending = '',
-    last_error = nil,
-  }, Telnet)
-end
-
-function Telnet:is_connected()
-  return self.connected and not self.closed
-end
-
-function Telnet:_fail(err)
-  self.last_error = err
-  local queue = self.queue
-  self.queue = {}
-  local pending = self.pending
-  self.pending = nil
-  if pending and pending.cb then
-    pending.cb(err, nil)
-  end
-  for _, req in ipairs(queue) do
-    if req.cb then
-      req.cb(err, nil)
-    end
-  end
-end
-
----@param cb fun(err: string|nil)
-function Telnet:connect(cb)
-  if self.connected or self.connecting then
-    cb(nil)
-    return
-  end
-  self.connecting = true
-  self.closed = false
-  self.last_error = nil
-  self.connect_generation = self.connect_generation + 1
-  local generation = self.connect_generation
-
-  local function do_connect(ip)
-    if self.closed or self.connect_generation ~= generation then
-      return
-    end
-    local tcp = uv.new_tcp()
-    if not tcp then
-      self.connecting = false
-      cb('could not create tcp handle')
-      return
-    end
-    self.handle = tcp
-    uv.tcp_connect(tcp, ip, self.port, function(err)
-      if self.closed or self.connect_generation ~= generation then
-        pcall(function()
-          if not tcp:is_closing() then
-            tcp:close()
-          end
-        end)
-        return
-      end
-      if err then
-        self.connecting = false
-        self.connected = false
-        pcall(function()
-          tcp:close()
-        end)
-        self.handle = nil
-        self.last_error = err
-        vim.schedule(function()
-          if not self.closed and self.connect_generation == generation then
-            cb(err)
-          end
-        end)
-        return
-      end
-      self.connecting = false
-      self.connected = true
-      self.ready = false
-      self.rx = ''
-      tcp:read_start(function(rerr, chunk)
-        if rerr then
-          vim.schedule(function()
-            if not self.closed and self.connect_generation == generation then
-              self:_fail(rerr)
-              self:close()
-            end
-          end)
-          return
-        end
-        if not chunk then -- EOF
-          vim.schedule(function()
-            if not self.closed and self.connect_generation == generation then
-              self:_fail('connection closed by OpenOCD')
-              self:close()
-            end
-          end)
-          return
-        end
-        vim.schedule(function()
-          if not self.closed and self.connect_generation == generation then
-            self:_on_data(chunk)
-          end
-        end)
-      end)
-      -- If the banner never shows up, unblock the queue anyway.
-      local t = uv.new_timer()
-      self.banner_timer = t
-      if t then
-        t:start(400, 0, function()
-          t:stop()
-          t:close()
-          self.banner_timer = nil
-          vim.schedule(function()
-            if not self.closed and self.connect_generation == generation and not self.ready then
-              self.ready = true
-              self:_pump()
-            end
-          end)
-        end)
-      end
-      vim.schedule(function()
-        if not self.closed and self.connect_generation == generation then
-          cb(nil)
-        end
-      end)
-    end)
-  end
-
-  if self.host:match('^%d+%.%d+%.%d+%.%d+$') then
-    do_connect(self.host)
-  else
-    uv.getaddrinfo(self.host, nil, { family = 'inet', socktype = 'stream' }, function(err, res)
-      if err or not res or not res[1] then
-        self.connecting = false
-        vim.schedule(function()
-          if not self.closed and self.connect_generation == generation then
-            cb(err or ('cannot resolve host ' .. self.host))
-          end
-        end)
-        return
-      end
-      local addr = res[1].addr
-      vim.schedule(function()
-        if not self.closed and self.connect_generation == generation then
-          do_connect(addr)
-        end
-      end)
-    end)
-  end
-end
-
-function Telnet:close()
-  self.closed = true
-  self.connect_generation = self.connect_generation + 1
-  self.connected = false
-  self.connecting = false
-  self.ready = false
-  self.iac_pending = ''
-  self:_cancel_timeout()
-  if self.banner_timer then
-    pcall(function()
-      self.banner_timer:stop()
-      self.banner_timer:close()
-    end)
-    self.banner_timer = nil
-  end
-  local h = self.handle
-  self.handle = nil
-  if h then
-    pcall(function()
-      h:read_stop()
-    end)
-    pcall(function()
-      if not h:is_closing() then
-        h:close()
-      end
-    end)
-  end
-  self.queue = {}
-  self.pending = nil
-  self.rx = ''
-end
-
-function Telnet:_cancel_timeout()
-  if self.timeout_timer then
-    pcall(function()
-      self.timeout_timer:stop()
-      self.timeout_timer:close()
-    end)
-    self.timeout_timer = nil
-  end
-end
-
---- Strip echoed command / prompt noise from a raw response body.
----@param body string
----@param cmd string
----@return string
-local function clean_response(body, cmd)
-  -- Some OpenOCD builds prefix telnet replies with a NUL after negotiation.
-  -- It is protocol noise, not part of the memory/register value.
-  body = body:gsub('%z', ''):gsub('\r', '')
-  body = body:gsub('^[%s]*> ?', '')
-  local lines = vim.split(body, '\n', { plain = true })
-  -- OpenOCD echoes back what we typed; drop the first line if it is the echo.
-  if lines[1] and vim.trim(lines[1]) == vim.trim(cmd) then
-    table.remove(lines, 1)
-  end
-  while #lines > 0 and vim.trim(lines[#lines]) == '' do
-    table.remove(lines)
-  end
-  while #lines > 0 and vim.trim(lines[1]) == '' do
-    table.remove(lines, 1)
-  end
-  return table.concat(lines, '\n')
-end
-
-function Telnet:_on_data(chunk)
-  chunk, self.iac_pending = strip_iac(chunk, self.iac_pending)
-  if not self.pending then
-    -- Connection banner (or unsolicited output): swallow it, but use it as the
-    -- "server is ready" signal.
-    self.rx = ''
-    if chunk:find('> %s*$') or chunk:find('>%s*$') then
-      self.ready = true
-      self:_pump()
-    end
-    return
-  end
-  self.rx = self.rx .. chunk
-  local body = self.rx:gsub('\r', '')
-  -- The prompt marks the end of the answer.
-  local stripped = body:match('^(.-)\n?> ?$')
-  if stripped == nil and body:sub(-2) == '> ' then
-    stripped = body:sub(1, -3)
-  end
-  if stripped ~= nil then
-    local req = self.pending
-    self.pending = nil
-    self.rx = ''
-    self.ready = true
-    self:_cancel_timeout()
-    if req.cb then
-      req.cb(nil, clean_response(stripped, req.cmd))
-    end
-    self:_pump()
-  end
-end
-
-function Telnet:_pump()
-  if self.closed or not self.connected or not self.ready then
-    return
-  end
-  if self.pending or #self.queue == 0 then
-    return
-  end
-  local req = table.remove(self.queue, 1)
-  self.pending = req
-  self.rx = ''
-  local h = self.handle
-  if not h then
-    self.pending = nil
-    if req.cb then
-      req.cb('not connected', nil)
-    end
-    return
-  end
-  h:write(req.cmd .. '\n', function(werr)
-    if werr then
-      vim.schedule(function()
-        if self.pending == req then
-          self.pending = nil
-          self:_cancel_timeout()
-          if req.cb then
-            req.cb(werr, nil)
-          end
-          self:_pump()
-        end
-      end)
-    end
-  end)
-  local t = uv.new_timer()
-  self.timeout_timer = t
-  if t then
-    t:start(self.timeout_ms, 0, function()
-      t:stop()
-      vim.schedule(function()
-        if self.pending == req then
-          self.pending = nil
-          self.rx = ''
-          self:_cancel_timeout()
-          if req.cb then
-            req.cb('timeout', nil)
-          end
-          self:_pump()
-        end
-      end)
-    end)
-  end
-end
-
----@param cmd string
----@param cb fun(err: string|nil, response: string|nil)
-function Telnet:send(cmd, cb)
-  if self.closed then
-    cb('not connected', nil)
-    return
-  end
-  table.insert(self.queue, { cmd = cmd, cb = cb })
-  self:_pump()
-end
-
-function Telnet:queue_size()
-  return #self.queue + (self.pending and 1 or 0)
-end
-
-M._Telnet = Telnet -- exported for tests/debugging
+local Telnet = require('cortex.telnet')
+M._Telnet = Telnet -- compatibility/testing seam
 
 -- Explicit seams used by the stopped-only peripheral browser.  Keeping these
 -- here makes it impossible for that browser to accidentally use watch.telnet.
 function M._peripheral_config(config)
-  return config or (M._watch and M._watch.session_config)
+  return config or active_session_config
 end
 
 function M._peripheral_endpoint(config)
   config = M._peripheral_config(config)
   local pcfg = tbl_get(M.config, 'peripheral') or {}
-  local host = tbl_get(config, 'telnetHost') or tbl_get(config, 'openocdTelnetHost')
-    or tbl_get(config, 'peripheralTelnetHost') or tbl_get(pcfg, 'host') or M.config.live_watch.host
-  local port = tbl_get(config, 'svdTelnetPort') or tbl_get(config, 'peripheralTelnetPort')
-    or tbl_get(config, 'telnetPort') or tbl_get(config, 'openocdTelnetPort')
-    or tbl_get(pcfg, 'port') or M.config.live_watch.port
+  local host = tbl_get(config, 'svdTelnetHost')
+    or tbl_get(config, 'peripheralTelnetHost')
+    or tbl_get(config, 'telnetHost')
+    or tbl_get(config, 'openocdTelnetHost')
+    or tbl_get(pcfg, 'host')
+    or M.config.live_watch.host
+  local port = tbl_get(config, 'svdTelnetPort')
+    or tbl_get(config, 'peripheralTelnetPort')
+    or tbl_get(config, 'telnetPort')
+    or tbl_get(config, 'openocdTelnetPort')
+    or tbl_get(pcfg, 'port')
+    or M.config.live_watch.port
   return tostring(host), tonumber(port) or 4444
 end
 
@@ -592,7 +220,11 @@ function M._peripheral_request(command, callback, config)
   end
   local tel = M._new_peripheral_telnet(config)
   tel:connect(function(err)
-    if err then callback(err, nil); tel:close(); return end
+    if err then
+      callback(err, nil)
+      tel:close()
+      return
+    end
     tel:send(command, function(send_err, response)
       callback(send_err, response)
       tel:close()
@@ -801,7 +433,8 @@ local function configured_limits()
   local lw = M.config.live_watch
   local config_lw = tbl_get(M._watch and M._watch.session_config, 'liveWatch')
   local depth = tonumber(tbl_get(config_lw, 'maxDepth') or tbl_get(config_lw, 'max_depth') or lw.max_depth) or 4
-  local children = tonumber(tbl_get(config_lw, 'maxChildren') or tbl_get(config_lw, 'max_children') or lw.max_children) or 32
+  local children = tonumber(tbl_get(config_lw, 'maxChildren') or tbl_get(config_lw, 'max_children') or lw.max_children)
+    or 32
   return math.max(1, math.min(8, math.floor(depth))), math.max(1, math.min(256, math.floor(children)))
 end
 
@@ -1050,8 +683,10 @@ local function decode_scalar(node, response)
     if bool then
       return number ~= 0 and 'true' or 'false'
     end
-    local signed = not type_name:match('unsigned') and not type_name:match('uint%d')
-      and not type_name:match('%*') and not type_name:match('^[uU]')
+    local signed = not type_name:match('unsigned')
+      and not type_name:match('uint%d')
+      and not type_name:match('%*')
+      and not type_name:match('^[uU]')
     local shown = number
     if signed and number >= 2 ^ (bits - 1) then
       shown = number - modulus
@@ -1080,6 +715,10 @@ local watch = {
   port = nil, ---@type integer|nil
   rate = nil, ---@type number|nil
   status = 'stopped',
+  -- DAP execution state is separate from the Telnet connection state. Live
+  -- Watch keeps its buffer while stopped, but only samples target memory
+  -- while the target is running.
+  target_state = nil, ---@type 'running'|'stopped'|nil
   last_connect_attempt = 0,
   render_scheduled = false,
   session_config = nil, ---@type table|nil
@@ -1217,67 +856,99 @@ local function open_window()
 end
 
 local function close_window()
-  if win_valid() then
-    pcall(api.nvim_win_close, watch.winid, true)
-  end
+  local winid = watch.winid
+  -- Clear this before closing: WinClosed is also used to notice a user
+  -- closing the window, and must not recursively call M.stop().
   watch.winid = nil
+  if winid and api.nvim_win_is_valid(winid) then
+    pcall(api.nvim_win_close, winid, true)
+  end
 end
-
----Line index (1 based, in the rendered buffer) of the first entry.
-local HEADER_LINES = 2
 
 local function render()
   if not buf_valid() then
     return
   end
-  local lines = {}
+  local content_width = ui.content_width(watch.bufnr, 80)
   local rate = watch.rate or M.config.live_watch.samples_per_second
   local ep = string.format('%s:%d', watch.host or M.config.live_watch.host, watch.port or M.config.live_watch.port)
-  lines[1] = string.format('Cortex Live Watch  [%s]  %s  %.3g Hz', watch.status, ep, rate)
-  lines[2] = string.rep('─', math.max(#lines[1], 30))
+  local display_status = watch.target_state and (watch.target_state .. ' / ' .. tostring(watch.status)) or watch.status
+  local icon, status_group = ui.status_icon(watch.target_state == 'stopped' and 'stopped' or watch.status, 'live_watch')
+  local label_width = math.max(12, math.min(32, math.floor((content_width - 6) * 0.45)))
+  local value_width = math.max(8, content_width - label_width - 6)
+  local status_line = ui.truncate(string.format('  %s  %s  %s  %.3g Hz', icon, display_status, ep, rate), content_width)
+  local lines = {
+    'Cortex Live Watch',
+    status_line,
+    string.format('  %-' .. label_width .. 's  %s', 'Expression', ui.truncate('Value', value_width)),
+    '  ' .. string.rep('─', content_width),
+  }
+  local highlights = {
+    { line = 1, group = 'CortexTitle' },
+    { line = 2, group = status_group, start = 2, finish = -1 },
+    { line = 3, group = 'CortexHeader' },
+    { line = 4, group = 'CortexSeparator' },
+  }
 
   if #watch.entries == 0 then
-    lines[#lines + 1] = '(no watch expressions -- :CortexDebugWatchAdd <expr>)'
+    lines[#lines + 1] = ui.truncate('  (no watch expressions -- :CortexDebugWatchAdd <expr>)', content_width)
+    ui.highlight_line(highlights, #lines, 'CortexDim')
   end
-
-  local width = 0
-  for _, e in ipairs(watch.entries) do
-    width = math.max(width, #e.raw)
-  end
-  width = math.max(1, math.min(width, 32))
 
   local line_of = {}
   local function add_row(entry, node, indent, root)
-    local label = root and entry.raw or (node.name or node.expression)
+    local label = tostring(root and entry.raw or (node.name or node.expression))
     local text
+    local value_group
     if (root and entry.error) or (not root and node.error) then
       text = '<unresolved: ' .. tostring(root and entry.error or node.error) .. '>'
+      value_group = 'CortexError'
     elseif root and entry.resolving then
       text = '<resolving...>'
+      value_group = 'CortexWarn'
     elseif node.value ~= nil then
       text = node.value
+      value_group = 'CortexValue'
     elseif node.children and #node.children > 0 then
       text = '{' .. tostring(node.type or 'object') .. '}'
       if node.truncated then
         text = text .. ' ...'
       end
+      value_group = 'CortexDim'
     elseif node.type then
       text = '<' .. node.type .. '>'
+      value_group = 'CortexDim'
     else
       text = root and '<pending>' or '<unresolved>'
+      value_group = 'CortexDim'
     end
     local value_lines = vim.split(tostring(text), '\n', { plain = true })
     local prefix = string.rep('  ', indent)
-    if root then
-      label = label:sub(1, width)
-      lines[#lines + 1] = prefix .. string.format('%-' .. width .. 's  %s', label, value_lines[1] or '')
-    else
-      lines[#lines + 1] = prefix .. label .. '  ' .. (value_lines[1] or '')
+    local row_label_width = math.max(6, label_width - #prefix)
+    local shown_label = ui.truncate(label, row_label_width)
+    local row_value_width = math.max(4, content_width - #prefix - row_label_width - 4)
+    local shown_value = ui.truncate(value_lines[1] or '', row_value_width)
+    local first = prefix .. string.format('%-' .. row_label_width .. 's  %s', shown_label, shown_value)
+    lines[#lines + 1] = first
+    local row = #lines
+    line_of[row] = entry
+    highlights[#highlights + 1] = {
+      line = row,
+      group = root and 'CortexName' or 'CortexDim',
+      start = #prefix,
+      finish = #prefix + #shown_label,
+    }
+    local value_at = first:find(shown_value, #prefix + row_label_width + 3, true)
+    if value_at and shown_value ~= '' then
+      highlights[#highlights + 1] =
+        { line = row, group = value_group, start = value_at - 1, finish = value_at - 1 + #shown_value }
     end
-    line_of[#lines] = entry
     for i = 2, #value_lines do
-      lines[#lines + 1] = string.rep(' ', #prefix + (root and width + 2 or #label + 2)) .. value_lines[i]
+      local continuation = string.rep(' ', #prefix + row_label_width + 2)
+        .. ui.truncate(value_lines[i], row_value_width)
+      lines[#lines + 1] = continuation
       line_of[#lines] = entry
+      ui.highlight_line(highlights, #lines, value_group)
     end
     for _, child in ipairs(node.children or {}) do
       add_row(entry, child, indent + 1, false)
@@ -1288,30 +959,38 @@ local function render()
     if e.kind == 'symbol' and e.root then
       add_row(e, e.root, 0, true)
     else
-      local text
+      local text, value_group
       if e.error then
-        text = '<unresolved: ' .. tostring(e.error) .. '>'
+        text, value_group = '<unresolved: ' .. tostring(e.error) .. '>', 'CortexError'
       elseif e.resolving then
-        text = '<resolving...>'
+        text, value_group = '<resolving...>', 'CortexWarn'
       elseif e.value == nil then
-        text = '<pending>'
+        text, value_group = '<pending>', 'CortexDim'
       else
-        text = e.value
+        text, value_group = e.value, 'CortexValue'
       end
       local value_lines = vim.split(tostring(text), '\n', { plain = true })
-      lines[#lines + 1] = string.format('%-' .. width .. 's  %s', e.raw:sub(1, width), value_lines[1] or '')
-      line_of[#lines] = e
+      local label = ui.truncate(e.raw, label_width)
+      local shown_value = ui.truncate(value_lines[1] or '', value_width)
+      local first = '  ' .. string.format('%-' .. label_width .. 's  %s', label, shown_value)
+      lines[#lines + 1] = first
+      local row = #lines
+      line_of[row] = e
+      highlights[#highlights + 1] = { line = row, group = 'CortexName', start = 2, finish = 2 + #label }
+      local value_at = first:find(shown_value, label_width + 5, true)
+      if value_at and shown_value ~= '' then
+        highlights[#highlights + 1] =
+          { line = row, group = value_group, start = value_at - 1, finish = value_at - 1 + #shown_value }
+      end
       for i = 2, #value_lines do
-        lines[#lines + 1] = string.rep(' ', width + 2) .. value_lines[i]
+        lines[#lines + 1] = '  ' .. string.rep(' ', label_width + 2) .. ui.truncate(value_lines[i], value_width)
         line_of[#lines] = e
+        ui.highlight_line(highlights, #lines, value_group)
       end
     end
   end
   watch.line_map = line_of
-
-  vim.bo[watch.bufnr].modifiable = true
-  api.nvim_buf_set_lines(watch.bufnr, 0, -1, false, lines)
-  vim.bo[watch.bufnr].modifiable = false
+  ui.render(watch.bufnr, lines, highlights)
 end
 
 local function schedule_render()
@@ -1321,7 +1000,11 @@ local function schedule_render()
   watch.render_scheduled = true
   vim.schedule(function()
     watch.render_scheduled = false
-    render()
+    -- A late hydration/connect callback may arrive after the user closed the
+    -- standalone window. Do not repaint a hidden buffer in that case.
+    if watch.active or win_valid() then
+      render()
+    end
   end)
 end
 
@@ -1330,6 +1013,12 @@ end
 ----------------------------------------------------------------------------
 
 local function poll_once()
+  -- Live Watch is a running-state view. While stopped, DAP owns the target
+  -- and the other Cortex views are refreshed instead; keeping the old values
+  -- here avoids racing a pause with an in-flight Telnet read.
+  if watch.target_state == 'stopped' then
+    return
+  end
   local tel = watch.telnet
   if not tel or not tel:is_connected() then
     return
@@ -1500,6 +1189,9 @@ end
 function M.stop(opts)
   opts = opts or {}
   watch.active = false
+  -- Cancel both pending metadata chains and late Telnet callbacks before
+  -- tearing down the socket/window.
+  invalidate_hydration()
   stop_timer()
   if watch.telnet then
     watch.telnet:close()
@@ -1687,6 +1379,7 @@ function M.status()
     port = watch.port,
     rate = watch.rate,
     entries = #watch.entries,
+    target_state = watch.target_state,
   }
 end
 
@@ -1694,10 +1387,6 @@ end
 -- nvim-dap wiring
 ----------------------------------------------------------------------------
 
-local peripheral = require('cortex.peripheral')
-local rtos = require('cortex.rtos')
-local callstack = require('cortex.callstack')
-local target = require('cortex.target')
 M._peripheral = peripheral -- exposed for tests/statusline integrations
 M._rtos = rtos -- exposed for tests/statusline integrations
 M._callstack = callstack -- exposed for tests/statusline integrations
@@ -1705,6 +1394,7 @@ M._target = target -- exposed for tests/statusline integrations
 
 local function on_session_start(config)
   invalidate_hydration()
+  active_session_config = config
   peripheral.on_session_start(config)
   rtos.on_session_start(config)
   callstack.on_session_start(config)
@@ -1721,6 +1411,7 @@ local function on_session_start(config)
     end
   end
   watch.session_config = config
+  watch.target_state = 'running'
   local host, port, rate = endpoint_from_config(config)
   watch.host, watch.port, watch.rate = host, port, rate
   local lw = tbl_get(config, 'liveWatch')
@@ -1747,6 +1438,7 @@ local function on_session_end()
   callstack.on_session_end()
   M.close_views()
   watch.session_config = nil
+  active_session_config = nil
   for _, e in ipairs(watch.entries) do
     if e.kind == 'symbol' then
       e.command = nil
@@ -1773,14 +1465,22 @@ local function register_listeners(dap)
     peripheral.on_session_continued()
     rtos.on_session_continued()
     callstack.on_session_continued()
-    -- Do not let an in-flight stopped-state hydration chain issue more DAP
-    -- requests after resume. Existing address plans remain telnet-only.
+    -- Do not let an in-flight stopped-state hydration chain or Telnet sample
+    -- update the view after resume. Existing address plans remain available
+    -- for the next running-state poll.
     invalidate_hydration()
+    watch.target_state = 'running'
+    schedule_render()
   end
   dap.listeners.after.event_stopped[key] = function()
+    -- Invalidate a poll that was in flight when the pause arrived before
+    -- starting the new stopped-state hydration pass.
+    invalidate_hydration()
+    watch.target_state = 'stopped'
     peripheral.on_session_stopped()
     rtos.on_session_stopped()
     callstack.on_session_stopped()
+    schedule_render()
     -- A stopped event is the only point at which C-expression metadata is
     -- hydrated. Running samples below never issue evaluate/variables calls.
     for _, e in ipairs(watch.entries) do
@@ -1793,12 +1493,15 @@ local function register_listeners(dap)
     end
   end
   dap.listeners.after.event_terminated[key] = function()
+    watch.target_state = nil
     on_session_end()
   end
   dap.listeners.after.event_exited[key] = function()
+    watch.target_state = nil
     on_session_end()
   end
   dap.listeners.after.disconnect[key] = function()
+    watch.target_state = nil
     on_session_end()
   end
 end
@@ -1811,10 +1514,27 @@ local function register_autocmds()
       M._shutdown()
     end,
   })
+  api.nvim_create_autocmd('WinClosed', {
+    group = group,
+    callback = function(args)
+      local closed = tonumber(args.match)
+      if closed ~= watch.winid then
+        return
+      end
+      watch.winid = nil
+      if watch.active then
+        -- Treat a manual close like M.close(), otherwise the timer keeps
+        -- polling a hidden buffer and the next toggle feels inverted.
+        M.stop()
+      end
+    end,
+  })
 end
 
 function M._shutdown()
   watch.active = false
+  watch.target_state = nil
+  invalidate_hydration()
   stop_timer()
   if watch.telnet then
     watch.telnet:close()
@@ -1977,57 +1697,63 @@ M.refresh_rtos = M.rtos_refresh
 M.open_peripheral = M.peripheral_open
 M.refresh_peripheral = M.peripheral_refresh
 
---- Create the user commands unless they already exist.
+local commands = {
+  { 'CortexDebugWatch', M.toggle, { desc = 'Toggle the Cortex live watch window' } },
+  {
+    'CortexDebugWatchAdd',
+    function(opts)
+      M.add(opts.args ~= '' and opts.args or nil)
+    end,
+    { nargs = '*', desc = 'Add a Cortex live watch expression' },
+  },
+  { 'CortexDebugWatchClear', M.clear, { desc = 'Clear all Cortex live watch expressions' } },
+  {
+    'CortexDebugTelnet',
+    function(opts)
+      M.telnet(opts.args ~= '' and opts.args or nil)
+    end,
+    { nargs = '*', desc = 'Send a command to the OpenOCD telnet server' },
+  },
+  { 'CortexDebugPeripheral', M.peripheral_toggle, { desc = 'Toggle the stopped-only Cortex SVD peripheral browser' } },
+  {
+    'CortexDebugPeripheralRefresh',
+    function()
+      M.peripheral_refresh()
+    end,
+    { desc = 'Refresh SVD peripheral registers (stopped only)' },
+  },
+  { 'CortexDebugRTOS', M.rtos_toggle, { desc = 'Toggle the stopped-only FreeRTOS task browser' } },
+  {
+    'CortexDebugRTOSRefresh',
+    function()
+      M.rtos_refresh()
+    end,
+    { desc = 'Refresh FreeRTOS tasks (stopped only)' },
+  },
+  { 'CortexFreeRTOS', M.rtos_toggle, { desc = 'Toggle the stopped-only FreeRTOS task browser' } },
+  { 'CortexDebugCallStack', M.callstack_toggle, { desc = 'Toggle the stopped-only current call stack' } },
+  {
+    'CortexDebugCallStackRefresh',
+    function()
+      M.callstack_refresh()
+    end,
+    { desc = 'Refresh the current call stack (stopped only)' },
+  },
+  { 'CortexDebugStack', M.callstack_toggle, { desc = 'Toggle the stopped-only current call stack' } },
+  { 'CortexDebugSelect', M.debug_select, { desc = 'Select and remember a DAP launch target' } },
+  { 'CortexDebugStart', M.debug_start, { desc = 'Start or continue the remembered DAP target' } },
+  { 'CortexDebugTarget', M.debug_target, { desc = 'Show the remembered DAP launch target' } },
+  { 'CortexDebugClearTarget', M.debug_clear_target, { desc = 'Forget the remembered DAP launch target' } },
+}
+
+---Create the user commands unless another plugin or user config owns the name.
 function M._create_commands()
-  local cmd = api.nvim_create_user_command
-  if vim.fn.exists(':CortexDebugWatch') ~= 2 then cmd('CortexDebugWatch', function()
-    M.toggle()
-  end, { desc = 'Toggle the Cortex live watch window' }) end
-  if vim.fn.exists(':CortexDebugWatchAdd') ~= 2 then cmd('CortexDebugWatchAdd', function(o)
-    M.add(o.args ~= '' and o.args or nil)
-  end, { nargs = '*', desc = 'Add a Cortex live watch expression' }) end
-  if vim.fn.exists(':CortexDebugWatchClear') ~= 2 then cmd('CortexDebugWatchClear', function()
-    M.clear()
-  end, { desc = 'Clear all Cortex live watch expressions' }) end
-  if vim.fn.exists(':CortexDebugTelnet') ~= 2 then cmd('CortexDebugTelnet', function(o)
-    M.telnet(o.args ~= '' and o.args or nil)
-  end, { nargs = '*', desc = 'Send a command to the OpenOCD telnet server' }) end
-  if vim.fn.exists(':CortexDebugPeripheral') ~= 2 then cmd('CortexDebugPeripheral', function()
-    M.peripheral_toggle()
-  end, { desc = 'Toggle the stopped-only Cortex SVD peripheral browser' }) end
-  if vim.fn.exists(':CortexDebugPeripheralRefresh') ~= 2 then cmd('CortexDebugPeripheralRefresh', function()
-    M.peripheral_refresh()
-  end, { desc = 'Refresh SVD peripheral registers (stopped only)' }) end
-  if vim.fn.exists(':CortexDebugRTOS') ~= 2 then cmd('CortexDebugRTOS', function()
-    M.rtos_toggle()
-  end, { desc = 'Toggle the stopped-only FreeRTOS task browser' }) end
-  if vim.fn.exists(':CortexDebugRTOSRefresh') ~= 2 then cmd('CortexDebugRTOSRefresh', function()
-    M.rtos_refresh()
-  end, { desc = 'Refresh FreeRTOS tasks (stopped only)' }) end
-  if vim.fn.exists(':CortexFreeRTOS') ~= 2 then cmd('CortexFreeRTOS', function()
-    M.rtos_toggle()
-  end, { desc = 'Toggle the stopped-only FreeRTOS task browser' }) end
-  if vim.fn.exists(':CortexDebugCallStack') ~= 2 then cmd('CortexDebugCallStack', function()
-    M.callstack_toggle()
-  end, { desc = 'Toggle the stopped-only current call stack' }) end
-  if vim.fn.exists(':CortexDebugCallStackRefresh') ~= 2 then cmd('CortexDebugCallStackRefresh', function()
-    M.callstack_refresh()
-  end, { desc = 'Refresh the current call stack (stopped only)' }) end
-  if vim.fn.exists(':CortexDebugStack') ~= 2 then cmd('CortexDebugStack', function()
-    M.callstack_toggle()
-  end, { desc = 'Toggle the stopped-only current call stack' }) end
-  if vim.fn.exists(':CortexDebugSelect') ~= 2 then cmd('CortexDebugSelect', function()
-    M.debug_select()
-  end, { desc = 'Select and remember a DAP launch target' }) end
-  if vim.fn.exists(':CortexDebugStart') ~= 2 then cmd('CortexDebugStart', function()
-    M.debug_start()
-  end, { desc = 'Start or continue the remembered DAP target' }) end
-  if vim.fn.exists(':CortexDebugTarget') ~= 2 then cmd('CortexDebugTarget', function()
-    M.debug_target()
-  end, { desc = 'Show the remembered DAP launch target' }) end
-  if vim.fn.exists(':CortexDebugClearTarget') ~= 2 then cmd('CortexDebugClearTarget', function()
-    M.debug_clear_target()
-  end, { desc = 'Forget the remembered DAP launch target' }) end
+  for _, command in ipairs(commands) do
+    local name = command[1]
+    if vim.fn.exists(':' .. name) ~= 2 then
+      api.nvim_create_user_command(name, command[2], command[3])
+    end
+  end
 end
 
 ----------------------------------------------------------------------------

@@ -77,7 +77,9 @@ local function config()
     stack_word_bytes = 'stackWordBytes',
   }
   for snake, camel in pairs(aliases) do
-    if session[snake] == nil and session[camel] ~= nil then result[snake] = session[camel] end
+    if session[snake] == nil and session[camel] ~= nil then
+      result[snake] = session[camel]
+    end
   end
   return result
 end
@@ -97,25 +99,34 @@ end
 local function parse_number(value)
   local text = trim(value)
   local hex = text:match('0[xX]([%da-fA-F]+)')
-  if hex then return tonumber(hex, 16) end
+  if hex then
+    return tonumber(hex, 16)
+  end
   local dec = text:match('^%-?%d+')
   return dec and tonumber(dec, 10) or nil
 end
 
 local function pointer(value)
   local number = parse_number(value)
-  if not number or number == 0 then return nil end
+  if not number or number == 0 then
+    return nil
+  end
   return string.format('0x%x', number), number
 end
 
 local function unescape_c_string(value)
-  return (value:gsub('\\(%d%d%d)', function(octal)
-    return string.char(tonumber(octal, 8))
-  end):gsub('\\([\\"nrt])', function(code)
-    return ({ ['\\'] = '\\', ['"'] = '"', n = '\n', r = '\r', t = '\t' })[code] or code
-  end):gsub('\\x(%x%x)', function(hex)
-    return string.char(tonumber(hex, 16))
-  end))
+  return (
+    value
+      :gsub('\\(%d%d%d)', function(octal)
+        return string.char(tonumber(octal, 8))
+      end)
+      :gsub('\\([\\"nrt])', function(code)
+        return ({ ['\\'] = '\\', ['"'] = '"', n = '\n', r = '\r', t = '\t' })[code] or code
+      end)
+      :gsub('\\x(%x%x)', function(hex)
+        return string.char(tonumber(hex, 16))
+      end)
+  )
 end
 
 local function parse_name(value)
@@ -139,15 +150,23 @@ local function active_session()
     return nil
   end
   local ok, dap = pcall(require, 'dap')
-  if not ok or not dap then return nil end
+  if not ok or not dap then
+    return nil
+  end
   local session = dap.session()
-  if not session or not session.initialized then return nil end
-  if not session.stopped_thread_id or not session.current_frame then return nil end
+  if not session or not session.initialized then
+    return nil
+  end
+  if not session.stopped_thread_id or not session.current_frame then
+    return nil
+  end
   return session
 end
 
 local function stopped()
-  if core and core._is_stopped then return core._is_stopped() end
+  if core and core._is_stopped then
+    return core._is_stopped()
+  end
   return active_session() ~= nil
 end
 
@@ -171,7 +190,9 @@ local function evaluate(session, expression, callback, guard)
   end
   local finished = false
   local function finish(err, value)
-    if finished then return end
+    if finished then
+      return
+    end
     finished = true
     if guard and not guard() then
       callback('target resumed', nil)
@@ -202,8 +223,12 @@ end
 
 local function type_candidates(setting, fallback)
   local value = setting
-  if type(value) == 'string' and value ~= '' then return { value, fallback } end
-  if type(value) == 'table' and #value > 0 then return vim.deepcopy(value) end
+  if type(value) == 'string' and value ~= '' then
+    return { value, fallback }
+  end
+  if type(value) == 'table' and #value > 0 then
+    return vim.deepcopy(value)
+  end
   return { fallback }
 end
 
@@ -218,9 +243,15 @@ end
 local function sequence(items, each, done)
   local index = 0
   local function next_item(err)
-    if err then done(err); return end
+    if err then
+      done(err)
+      return
+    end
     index = index + 1
-    if index > #items then done(nil); return end
+    if index > #items then
+      done(nil)
+      return
+    end
     each(items[index], next_item)
   end
   next_item(nil)
@@ -235,13 +266,21 @@ local function resolve_tcb_type(session, handle, field, callback, guard)
   local candidates = state.tcb_type and { state.tcb_type } or type_candidates(cfg.tcb_type, 'tskTCB')
   local index = 0
   local function try_next(last_err)
-    if guard and not guard() then callback('target resumed', nil); return end
+    if guard and not guard() then
+      callback('target resumed', nil)
+      return
+    end
     index = index + 1
     local candidate = candidates[index]
-    if not candidate then callback(last_err or 'cannot resolve TCB_t', nil); return end
+    if not candidate then
+      callback(last_err or 'cannot resolve TCB_t', nil)
+      return
+    end
     evaluate(session, expression_for_tcb(candidate, handle, field), function(err, value)
       if not err then
-        if not guard or guard() then state.tcb_type = candidate end
+        if not guard or guard() then
+          state.tcb_type = candidate
+        end
         callback(nil, value)
       elseif err == 'target resumed' or (guard and not guard()) then
         callback('target resumed', nil)
@@ -259,13 +298,21 @@ local function resolve_item_field(session, item, field, callback, guard)
   local candidates = selected and { selected } or type_candidates(cfg.list_item_type, 'xLIST_ITEM')
   local index = 0
   local function try_next(last_err)
-    if guard and not guard() then callback('target resumed', nil); return end
+    if guard and not guard() then
+      callback('target resumed', nil)
+      return
+    end
     index = index + 1
     local candidate = candidates[index]
-    if not candidate then callback(last_err or 'cannot resolve ListItem_t', nil); return end
+    if not candidate then
+      callback(last_err or 'cannot resolve ListItem_t', nil)
+      return
+    end
     evaluate(session, expression_for_item(candidate, item, field), function(err, value)
       if not err then
-        if not guard or guard() then state.list_item_type = candidate end
+        if not guard or guard() then
+          state.list_item_type = candidate
+        end
         callback(nil, value)
       elseif err == 'target resumed' or (guard and not guard()) then
         callback('target resumed', nil)
@@ -305,33 +352,58 @@ local function list_specs(priority_count)
 end
 
 local function read_list(session, generation, spec, budget, callback)
-  local guard = function() return valid(generation, session) end
+  local guard = function()
+    return valid(generation, session)
+  end
   local function fail(err)
     callback(err or ('cannot read ' .. spec.symbol), nil, spec.optional)
   end
-  if not guard() then callback('target resumed', nil, false); return end
+  if not guard() then
+    callback('target resumed', nil, false)
+    return
+  end
   evaluate(session, spec.symbol .. '.uxNumberOfItems', function(err, value)
-    if err then fail(err); return end
+    if err then
+      fail(err)
+      return
+    end
     local count = parse_number(value)
-    if count == nil then fail('invalid task-list count for ' .. spec.symbol); return end
-    if count <= 0 then callback(nil, {}, spec.optional); return end
+    if count == nil then
+      fail('invalid task-list count for ' .. spec.symbol)
+      return
+    end
+    if count <= 0 then
+      callback(nil, {}, spec.optional)
+      return
+    end
     if budget.remaining <= 0 then
       budget.truncated = true
       callback(nil, {}, spec.optional)
       return
     end
     local limit = math.min(count, budget.remaining)
-    if count > limit then budget.truncated = true end
+    if count > limit then
+      budget.truncated = true
+    end
     evaluate(session, '&' .. spec.symbol .. '.xListEnd', function(sentinel_err, sentinel_value)
-      if sentinel_err then fail(sentinel_err); return end
+      if sentinel_err then
+        fail(sentinel_err)
+        return
+      end
       local sentinel = pointer(sentinel_value)
       evaluate(session, spec.symbol .. '.xListEnd.pxNext', function(head_err, head_value)
-        if head_err then fail(head_err); return end
+        if head_err then
+          fail(head_err)
+          return
+        end
         local item = pointer(head_value)
         local entries = {}
         local index = 0
         local function next_item(err2)
-          if err2 then fail(err2); return end
+          if err2 then
+            fail(err2)
+            return
+          end
           if not guard() then
             callback('target resumed', nil, false)
             return
@@ -344,10 +416,16 @@ local function read_list(session, generation, spec, budget, callback)
           local item_pointer = item
           budget.remaining = budget.remaining - 1
           resolve_item_field(session, item_pointer, 'pvOwner', function(owner_err, owner_value)
-            if owner_err then fail(owner_err); return end
+            if owner_err then
+              fail(owner_err)
+              return
+            end
             local owner = pointer(owner_value)
             resolve_item_field(session, item_pointer, 'pxNext', function(next_err, next_value)
-              if next_err then fail(next_err); return end
+              if next_err then
+                fail(next_err)
+                return
+              end
               if owner then
                 entries[#entries + 1] = {
                   address = owner,
@@ -368,7 +446,10 @@ local function read_list(session, generation, spec, budget, callback)
 end
 
 local function read_task(session, generation, raw, callback)
-  if not valid(generation, session) then callback('target resumed'); return end
+  if not valid(generation, session) then
+    callback('target resumed')
+    return
+  end
   local task = vim.deepcopy(raw)
   local cfg = config()
   local f = fields()
@@ -381,13 +462,22 @@ local function read_task(session, generation, raw, callback)
     { key = 'stack', field = f.stack or 'pxStack', pointer = true, required = false },
     { key = 'end_of_stack', field = f.end_of_stack or 'pxEndOfStack', pointer = true, required = false },
   }
-  local guard = function() return valid(generation, session) end
+  local guard = function()
+    return valid(generation, session)
+  end
   local index = 0
   local function next_field(last_err)
-    if not guard() then callback('target resumed'); return end
-    if last_err == 'target resumed' then callback(last_err); return end
+    if not guard() then
+      callback('target resumed')
+      return
+    end
+    if last_err == 'target resumed' then
+      callback(last_err)
+      return
+    end
     if last_err and expressions[index] and expressions[index].required then
-      callback(last_err); return
+      callback(last_err)
+      return
     end
     index = index + 1
     if index > #expressions then
@@ -399,7 +489,9 @@ local function read_task(session, generation, raw, callback)
       if top and base and ending then
         local growth = tonumber(cfg.stack_growth) or -1
         local word_bytes = tonumber(cfg.stack_word_bytes) or 4
-        if word_bytes <= 0 then word_bytes = 4 end
+        if word_bytes <= 0 then
+          word_bytes = 4
+        end
         local low, high = math.min(base, ending), math.max(base, ending)
         local total = math.floor(math.abs(ending - base) / word_bytes)
         if top >= low and top <= high then
@@ -428,7 +520,9 @@ local function read_task(session, generation, raw, callback)
       end
       if field.string then
         local name = parse_name(value)
-        if name ~= '' then task.name = name end
+        if name ~= '' then
+          task.name = name
+        end
       elseif field.pointer then
         local text, number = pointer(value)
         task[field.key] = text or '-'
@@ -450,8 +544,12 @@ local function sort_tasks(tasks)
   local rank = { Running = 0, Ready = 1, Blocked = 2, Suspended = 3, Pending = 4, Terminated = 5 }
   table.sort(tasks, function(a, b)
     local ar, br = rank[a.state] or 99, rank[b.state] or 99
-    if ar ~= br then return ar < br end
-    if (a.priority or 0) ~= (b.priority or 0) then return (a.priority or 0) > (b.priority or 0) end
+    if ar ~= br then
+      return ar < br
+    end
+    if (a.priority or 0) ~= (b.priority or 0) then
+      return (a.priority or 0) > (b.priority or 0)
+    end
     return tostring(a.name) < tostring(b.name)
   end)
 end
@@ -462,8 +560,14 @@ local function collect_tasks(session, generation, raw_tasks, current_handle, cal
   local result = {}
   local index = 0
   local function next_task(err)
-    if err then callback(err); return end
-    if not valid(generation, session) then callback('target resumed'); return end
+    if err then
+      callback(err)
+      return
+    end
+    if not valid(generation, session) then
+      callback('target resumed')
+      return
+    end
     index = index + 1
     if index > #raw_tasks then
       sort_tasks(result)
@@ -505,14 +609,26 @@ function P.walk(callback)
   local configured_priorities = tonumber(cfg.max_priorities)
   local priority_count = math.max(1, math.floor(configured_priorities or 32))
   local priority_incomplete = configured_priorities == nil
-  local count_expr = string.format('sizeof(%s)/sizeof(%s[0])', sym.ready_lists or 'pxReadyTasksLists', sym.ready_lists or 'pxReadyTasksLists')
+  local count_expr = string.format(
+    'sizeof(%s)/sizeof(%s[0])',
+    sym.ready_lists or 'pxReadyTasksLists',
+    sym.ready_lists or 'pxReadyTasksLists'
+  )
   local current_handle
   local task_count
-  local guard = function() return valid(generation, session) end
+  local guard = function()
+    return valid(generation, session)
+  end
   local function start_walk()
-    if not guard() then callback('target resumed', nil); return end
+    if not guard() then
+      callback('target resumed', nil)
+      return
+    end
     evaluate(session, sym.current_tcb or 'pxCurrentTCB', function(current_err, current_value)
-      if current_err then callback(current_err, nil); return end
+      if current_err then
+        callback(current_err, nil)
+        return
+      end
       current_handle = pointer(current_value)
       evaluate(session, sym.task_count or 'uxCurrentNumberOfTasks', function(_, count_value)
         task_count = parse_number(count_value)
@@ -531,21 +647,33 @@ function P.walk(callback)
             else
               for _, entry in ipairs(entries or {}) do
                 local old = found[entry.number]
-                if not old or (old.state ~= 'Running' and entry.state == 'Ready') then found[entry.number] = entry end
+                if not old or (old.state ~= 'Running' and entry.state == 'Ready') then
+                  found[entry.number] = entry
+                end
               end
             end
             next_spec(nil)
           end)
         end, function(sequence_err)
-          if sequence_err then callback(sequence_err, nil); return end
+          if sequence_err then
+            callback(sequence_err, nil)
+            return
+          end
           local raw_tasks = {}
-          for _, task in pairs(found) do raw_tasks[#raw_tasks + 1] = task end
+          for _, task in pairs(found) do
+            raw_tasks[#raw_tasks + 1] = task
+          end
           if current_handle then
             local n = parse_number(current_handle)
-            if n and not found[n] then raw_tasks[#raw_tasks + 1] = { address = current_handle, number = n, state = 'Running' } end
+            if n and not found[n] then
+              raw_tasks[#raw_tasks + 1] = { address = current_handle, number = n, state = 'Running' }
+            end
           end
           collect_tasks(session, generation, raw_tasks, current_handle, function(task_err, tasks)
-            if task_err then callback(task_err, nil); return end
+            if task_err then
+              callback(task_err, nil)
+              return
+            end
             if #tasks == 0 and unavailable >= #list_specs(priority_count) then
               callback('cannot read FreeRTOS task lists', nil)
               return
@@ -563,7 +691,10 @@ function P.walk(callback)
     end, guard)
   end
   evaluate(session, count_expr, function(size_err, size_value)
-    if not guard() then callback('target resumed', nil); return end
+    if not guard() then
+      callback('target resumed', nil)
+      return
+    end
     local detected = not size_err and parse_number(size_value) or nil
     if detected and detected > 0 and detected <= 256 then
       if configured_priorities then
@@ -578,7 +709,10 @@ function P.walk(callback)
     -- GDB normally cannot evaluate preprocessor macros, but try the common
     -- spelling before falling back to the configured bound.
     evaluate(session, 'configMAX_PRIORITIES', function(macro_err, macro_value)
-      if not guard() then callback('target resumed', nil); return end
+      if not guard() then
+        callback('target resumed', nil)
+        return
+      end
       local macro_count = not macro_err and parse_number(macro_value) or nil
       if macro_count and macro_count > 0 and macro_count <= 256 then
         if configured_priorities then
@@ -603,7 +737,9 @@ local function win_valid()
 end
 
 local function view_win()
-  if win_valid() then return state.winid end
+  if win_valid() then
+    return state.winid
+  end
   if state.element_mode and buf_valid() and api.nvim_get_current_buf() == state.bufnr then
     return api.nvim_get_current_win()
   end
@@ -611,35 +747,103 @@ local function view_win()
 end
 
 local function render()
-  if not buf_valid() then return end
-  local count = state.task_count and ('  ' .. tostring(state.task_count) .. ' tasks') or ''
-  local lines = { 'Cortex FreeRTOS Tasks  [' .. state.status .. ']' .. count,
-    '  S  State       Prio  Name                       Runtime       Stack       Handle',
-    '  ' .. string.rep('─', 88) }
-  if state.error then lines[#lines + 1] = 'Error: ' .. state.error end
+  if not buf_valid() then
+    return
+  end
+  local content_width = ui.content_width(state.bufnr, 90)
+  local compact = content_width < 70
+  local icon, status_group = ui.status_icon(state.status)
+  local count = state.task_count and ('  ·  ' .. tostring(state.task_count) .. ' tasks') or ''
+  local status = ui.truncate(tostring(state.status) .. count, content_width - 4)
+  local task_width = math.max(10, math.min(26, content_width - (compact and 30 or 58)))
+  local header
+  if compact then
+    header = string.format('  S  %-10s  %-4s  %-' .. task_width .. 's  %s', 'State', 'Prio', 'Task', 'Handle')
+  else
+    header = string.format(
+      '  S  %-10s  %-4s  %-' .. task_width .. 's  %-10s  %-10s  %s',
+      'State',
+      'Prio',
+      'Task',
+      'Runtime',
+      'Stack',
+      'Handle'
+    )
+  end
+  header = ui.truncate(header, content_width)
+  local lines = {
+    'Cortex FreeRTOS Tasks',
+    string.format('  %s  %s', icon, status),
+    header,
+    '  ' .. string.rep('─', content_width),
+  }
+  local highlights = {
+    { line = 1, group = 'CortexTitle' },
+    { line = 2, group = status_group, start = 2, finish = -1 },
+    { line = 3, group = 'CortexHeader' },
+    { line = 4, group = 'CortexSeparator' },
+  }
+  local function add_line(text, group)
+    lines[#lines + 1] = ui.truncate(text, content_width)
+    if group then
+      ui.highlight_line(highlights, #lines, group)
+    end
+    return #lines
+  end
+  if state.error then
+    add_line('  ✖ ' .. tostring(state.error), 'CortexError')
+  end
   if #state.tasks == 0 then
-    lines[#lines + 1] = state.refreshing and '  (refreshing...)' or '  (no task data -- press r to refresh while stopped)'
+    add_line(
+      state.refreshing and '  ◌ refreshing task list...' or '  (no task data -- press r to refresh while stopped)',
+      'CortexDim'
+    )
   else
     for _, task in ipairs(state.tasks) do
-      local marker = task.running and '*' or ' '
-      local name = tostring(task.name or '?'):sub(1, 26)
-      lines[#lines + 1] = string.format('  %s  %-10s  %4s  %-26s  %-12s  %-10s  %s',
-        marker, tostring(task.state or '?'), tostring(task.priority or '-'), name,
-        tostring(task.runtime or '-'), tostring(task.stack or '-'), tostring(task.address or '-'))
+      local marker = task.running and '▶' or '·'
+      local name = ui.truncate(task.name or '?', task_width)
+      local task_state = ui.truncate(task.state or '?', 10)
+      local priority = ui.truncate(task.priority or '-', 4)
+      local runtime = ui.truncate(task.runtime or '-', 10)
+      local stack = ui.truncate(task.stack or '-', 10)
+      local handle = tostring(task.address or '-')
+      local text
+      if compact then
+        text =
+          string.format('  %s  %-10s  %4s  %-' .. task_width .. 's  %s', marker, task_state, priority, name, handle)
+      else
+        text = string.format(
+          '  %s  %-10s  %4s  %-' .. task_width .. 's  %-10s  %-10s  %s',
+          marker,
+          task_state,
+          priority,
+          name,
+          runtime,
+          stack,
+          handle
+        )
+      end
+      local line = add_line(text, task.running and 'CortexCurrent' or nil)
+      local at = lines[line]:find(name, 1, true)
+      if at then
+        highlights[#highlights + 1] = { line = line, group = 'CortexName', start = at - 1, finish = at - 1 + #name }
+      end
     end
   end
-  vim.bo[state.bufnr].modifiable = true
-  api.nvim_buf_set_lines(state.bufnr, 0, -1, false, lines)
-  vim.bo[state.bufnr].modifiable = false
+  ui.render(state.bufnr, lines, highlights)
 end
 
 local function window_config()
   local cfg = config()
-  return cfg.window or (core and core.config and core.config.window) or { position = 'bottom', width = 90, height = 16, border = 'rounded', focus_on_open = false }
+  return cfg.window
+    or (core and core.config and core.config.window)
+    or { position = 'bottom', width = 90, height = 16, border = 'rounded', focus_on_open = false }
 end
 
 local function create_buf()
-  if buf_valid() then return state.bufnr end
+  if buf_valid() then
+    return state.bufnr
+  end
   local bufnr = api.nvim_create_buf(false, true)
   vim.bo[bufnr].buftype, vim.bo[bufnr].bufhidden, vim.bo[bufnr].swapfile = 'nofile', 'hide', false
   vim.bo[bufnr].modifiable = false
@@ -648,18 +852,24 @@ local function create_buf()
   local opts = { buffer = bufnr, nowait = true, silent = true }
   local function mouse_focus()
     local winid = view_win()
-    if winid then ui.mouse_line(winid) end
+    if winid then
+      ui.mouse_line(winid)
+    end
   end
   local function close_from_buffer()
     if state.element_mode then
       local ok, dapui = pcall(require, 'dapui')
-      if ok and dapui.close then dapui.close() end
+      if ok and dapui.close then
+        dapui.close()
+      end
     else
       P.close()
     end
   end
   vim.keymap.set('n', 'q', close_from_buffer, opts)
-  vim.keymap.set('n', 'r', function() P.refresh() end, opts)
+  vim.keymap.set('n', 'r', function()
+    P.refresh()
+  end, opts)
   vim.keymap.set('n', '<LeftMouse>', mouse_focus, opts)
   vim.keymap.set('n', '<2-LeftMouse>', mouse_focus, opts)
   state.bufnr = bufnr
@@ -667,32 +877,54 @@ local function create_buf()
 end
 
 local function open_window()
-  if win_valid() then return state.winid end
+  if win_valid() then
+    return state.winid
+  end
   local bufnr, w = create_buf(), window_config()
   local previous = api.nvim_get_current_win()
   local winid
   if w.position == 'float' then
     local width = math.min(w.width or 90, math.max(30, vim.o.columns - 4))
     local height = math.min(w.height or 16, math.max(5, vim.o.lines - 6))
-    winid = api.nvim_open_win(bufnr, false, { relative = 'editor', width = width, height = height,
-      row = math.max(1, math.floor((vim.o.lines - height) / 2) - 1), col = math.max(0, math.floor((vim.o.columns - width) / 2)),
-      style = 'minimal', border = w.border or 'rounded', title = ' FreeRTOS Tasks ', title_pos = 'center' })
+    winid = api.nvim_open_win(bufnr, false, {
+      relative = 'editor',
+      width = width,
+      height = height,
+      row = math.max(1, math.floor((vim.o.lines - height) / 2) - 1),
+      col = math.max(0, math.floor((vim.o.columns - width) / 2)),
+      style = 'minimal',
+      border = w.border or 'rounded',
+      title = ' FreeRTOS Tasks ',
+      title_pos = 'center',
+    })
   else
     local position = w.position or 'bottom'
     local command
-    if position == 'left' then command = 'topleft vertical ' .. (w.width or 90) .. 'split'
-    elseif position == 'top' then command = 'topleft ' .. (w.height or 16) .. 'split'
-    elseif position == 'bottom' then command = 'botright ' .. (w.height or 16) .. 'split'
-    else command = 'botright vertical ' .. (w.width or 90) .. 'split' end
+    if position == 'left' then
+      command = 'topleft vertical ' .. (w.width or 90) .. 'split'
+    elseif position == 'top' then
+      command = 'topleft ' .. (w.height or 16) .. 'split'
+    elseif position == 'bottom' then
+      command = 'botright ' .. (w.height or 16) .. 'split'
+    else
+      command = 'botright vertical ' .. (w.width or 90) .. 'split'
+    end
     vim.cmd(command)
     winid = api.nvim_get_current_win()
     api.nvim_win_set_buf(winid, bufnr)
   end
-  vim.wo[winid].number, vim.wo[winid].relativenumber, vim.wo[winid].wrap, vim.wo[winid].signcolumn = false, false, false, 'no'
-  pcall(function() vim.wo[winid].winfixheight = true end)
-  pcall(function() vim.wo[winid].winfixwidth = true end)
+  vim.wo[winid].number, vim.wo[winid].relativenumber, vim.wo[winid].wrap, vim.wo[winid].signcolumn =
+    false, false, false, 'no'
+  pcall(function()
+    vim.wo[winid].winfixheight = true
+  end)
+  pcall(function()
+    vim.wo[winid].winfixwidth = true
+  end)
   state.winid = winid
-  if not w.focus_on_open and api.nvim_win_is_valid(previous) then api.nvim_set_current_win(previous) end
+  if not w.focus_on_open and api.nvim_win_is_valid(previous) then
+    api.nvim_set_current_win(previous)
+  end
   render()
   return winid
 end
@@ -708,9 +940,15 @@ function P.open()
 end
 
 function P.close()
-  if state.cancel_refresh then state.cancel_refresh('view closed') end
-  if state.element_mode then return end
-  if win_valid() then pcall(api.nvim_win_close, state.winid, true) end
+  if state.cancel_refresh then
+    state.cancel_refresh('view closed')
+  end
+  if state.element_mode then
+    return
+  end
+  if win_valid() then
+    pcall(api.nvim_win_close, state.winid, true)
+  end
   state.winid = nil
 end
 
@@ -722,7 +960,11 @@ function P.toggle()
     end
     return
   end
-  if win_valid() then P.close() else P.open() end
+  if win_valid() then
+    P.close()
+  else
+    P.open()
+  end
 end
 
 ---Register this view as an nvim-dap-ui layout element.
@@ -731,7 +973,9 @@ function P.element()
   create_buf()
   render()
   return {
-    buffer = function() return create_buf() end,
+    buffer = function()
+      return create_buf()
+    end,
     render = render,
     allow_without_session = true,
     float_defaults = function()
@@ -741,12 +985,16 @@ function P.element()
 end
 
 function P.refresh(callback)
-  if state.cancel_refresh then state.cancel_refresh('refresh superseded') end
+  if state.cancel_refresh then
+    state.cancel_refresh('refresh superseded')
+  end
   local session = active_session()
   if not session or not stopped() then
     state.status, state.error = 'target running (refresh skipped)', 'target must be stopped'
     render()
-    if callback then callback(state.error) end
+    if callback then
+      callback(state.error)
+    end
     return nil, state.error
   end
   state.generation = state.generation + 1
@@ -755,9 +1003,13 @@ function P.refresh(callback)
   local finished = false
   local cancel
   local function finish(err, data)
-    if finished then return end
+    if finished then
+      return
+    end
     finished = true
-    if state.cancel_refresh == cancel then state.cancel_refresh = nil end
+    if state.cancel_refresh == cancel then
+      state.cancel_refresh = nil
+    end
     state.refreshing = false
     if err then
       state.error, state.status = format_error(err), 'error'
@@ -766,28 +1018,43 @@ function P.refresh(callback)
       state.tasks, state.task_count = data.tasks or {}, data.task_count
       state.truncated, state.priority_incomplete = data.truncated, data.priority_incomplete
       local notes = {}
-      if data.unavailable and data.unavailable > 0 then notes[#notes + 1] = 'some lists unavailable' end
-      if data.truncated then notes[#notes + 1] = 'task limit reached' end
-      if data.priority_incomplete then notes[#notes + 1] = 'priority bound unverified' end
+      if data.unavailable and data.unavailable > 0 then
+        notes[#notes + 1] = 'some lists unavailable'
+      end
+      if data.truncated then
+        notes[#notes + 1] = 'task limit reached'
+      end
+      if data.priority_incomplete then
+        notes[#notes + 1] = 'priority bound unverified'
+      end
       state.status = 'stopped / refreshed' .. (#notes > 0 and (' (' .. table.concat(notes, ', ') .. ')') or '')
     end
     render()
-    if callback then callback(err, data) end
+    if callback then
+      callback(err, data)
+    end
   end
   cancel = function(err)
-    if finished then return end
+    if finished then
+      return
+    end
     finish(err or 'refresh cancelled')
   end
   state.cancel_refresh = cancel
   P.walk(function(err, data)
-    if not err and not valid(generation, session) then finish('target resumed'); return end
+    if not err and not valid(generation, session) then
+      finish('target resumed')
+      return
+    end
     finish(err, data)
   end)
   return true
 end
 
 function P.on_session_start(config_value)
-  if state.cancel_refresh then state.cancel_refresh('new session') end
+  if state.cancel_refresh then
+    state.cancel_refresh('new session')
+  end
   state.generation = state.generation + 1
   state.session_config = config_value or {}
   state.tasks, state.task_count, state.error = {}, nil, nil
@@ -802,7 +1069,9 @@ function P.on_session_start(config_value)
 end
 
 function P.on_session_continued()
-  if state.cancel_refresh then state.cancel_refresh('target resumed') end
+  if state.cancel_refresh then
+    state.cancel_refresh('target resumed')
+  end
   state.generation = state.generation + 1
   state.status = 'running (refresh skipped)'
   render()
@@ -811,11 +1080,15 @@ end
 function P.on_session_stopped()
   state.status = 'stopped (refresh available)'
   render()
-  if (win_valid() or state.element_mode) and config().auto_refresh_on_stop then P.refresh() end
+  if (win_valid() or state.element_mode) and config().auto_refresh_on_stop then
+    P.refresh()
+  end
 end
 
 function P.on_session_end()
-  if state.cancel_refresh then state.cancel_refresh('session ended') end
+  if state.cancel_refresh then
+    state.cancel_refresh('session ended')
+  end
   state.generation = state.generation + 1
   state.session_config, state.tasks, state.task_count = nil, {}, nil
   state.truncated, state.priority_incomplete = false, false

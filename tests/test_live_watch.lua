@@ -87,7 +87,17 @@ function session:request(command, args, cb)
 end
 
 local dap = {
-  listeners = { after = {}, before = {} },
+  listeners = {
+    after = {
+      event_initialized = {},
+      event_continued = {},
+      event_stopped = {},
+      event_terminated = {},
+      event_exited = {},
+      disconnect = {},
+    },
+    before = {},
+  },
   session = function()
     return session
   end,
@@ -163,5 +173,28 @@ assert(entry.root.children[3].children[1].value:find('0x1234', 1, true), 'array 
 assert(entry.root.children[4].value:find('0x20000004', 1, true), 'pointer decode failed')
 assert(entry.root.children[4].children[1].children[1].value:find('-1', 1, true), 'pointee decode failed')
 
-print('live watch hydration/polling: ok')
+-- A pause must leave the watch buffer intact without racing a running-state
+-- Telnet sample against the stopped-state DAP hydration pass.
+dap.adapters = {}
+cortex.setup({ live_watch = { auto_open = false } })
+local on_stopped = assert(dap.listeners.after.event_stopped['cortex.nvim'])
+local on_continued = assert(dap.listeners.after.event_continued['cortex.nvim'])
+stopped = true
+session.stopped_thread_id = 1
+session.current_frame = { id = 1 }
+local sent_at_pause = #sent
+watch.target_state = 'stopped'
+cortex.refresh()
+assert(#sent == sent_at_pause, 'paused watch sampled Telnet')
+on_stopped()
+assert(watch.target_state == 'stopped', 'pause did not mark watch stopped')
+stopped = false
+session.stopped_thread_id = nil
+session.current_frame = nil
+on_continued()
+assert(watch.target_state == 'running', 'resume did not mark watch running')
+cortex.refresh()
+assert(#sent > sent_at_pause, 'watch did not resume Telnet sampling')
+
+print('live watch hydration/pause-resume: ok')
 vim.cmd('qa!')
