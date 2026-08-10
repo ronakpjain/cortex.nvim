@@ -134,7 +134,41 @@ function telnet:close()
 end
 
 local cortex = require('cortex')
+local live_watch = require('cortex.live_watch')
 local watch = cortex._watch
+assert(live_watch.state == watch, 'cortex._watch does not expose live-watch state')
+for _, method in ipairs({
+  'setup',
+  'configure',
+  'on_session_start',
+  'on_session_continued',
+  'on_session_stopped',
+  'on_session_end',
+  'on_window_closed',
+  'shutdown',
+  'start',
+  'stop',
+  'open',
+  'close',
+  'toggle',
+  'add',
+  'clear',
+  'refresh',
+  'telnet',
+  'status',
+}) do
+  assert(type(live_watch[method]) == 'function', 'missing live-watch method: ' .. method)
+end
+local original_status = live_watch.status
+local delegated = {}
+live_watch.status = function(...)
+  delegated = { ... }
+  return 'delegated'
+end
+assert(cortex.status('status-argument') == 'delegated', 'public status did not delegate')
+assert(delegated[1] == 'status-argument', 'delegation dropped arguments')
+live_watch.status = original_status
+
 watch.active = true
 watch.telnet = telnet
 watch.session_config = { liveWatch = { maxDepth = 6, maxChildren = 16 } }
@@ -196,5 +230,61 @@ assert(watch.target_state == 'running', 'resume did not mark watch running')
 cortex.refresh()
 assert(#sent > sent_at_pause, 'watch did not resume Telnet sampling')
 
-print('live watch hydration/pause-resume: ok')
+-- The DAP listeners stay in init, but each watch transition is delegated to
+-- the focused module.
+local lifecycle_calls = {}
+local lifecycle_methods = {
+  'on_session_start',
+  'on_session_continued',
+  'on_session_stopped',
+  'on_session_end',
+}
+local lifecycle_originals = {}
+for _, method in ipairs(lifecycle_methods) do
+  lifecycle_originals[method] = live_watch[method]
+  live_watch[method] = function(config)
+    lifecycle_calls[#lifecycle_calls + 1] = { method, config }
+  end
+end
+local listener_config = { liveWatch = { enabled = false } }
+dap.listeners.after.event_initialized['cortex.nvim']({ config = listener_config })
+dap.listeners.after.event_continued['cortex.nvim']()
+dap.listeners.after.event_stopped['cortex.nvim']()
+dap.listeners.after.event_terminated['cortex.nvim']()
+for index, method in ipairs(lifecycle_methods) do
+  assert(lifecycle_calls[index] and lifecycle_calls[index][1] == method, 'listener did not delegate ' .. method)
+end
+assert(lifecycle_calls[1][2] == listener_config, 'session config was not delegated')
+for _, method in ipairs(lifecycle_methods) do
+  live_watch[method] = lifecycle_originals[method]
+end
+
+live_watch.configure({ telnetHost = 'debug-host', telnetPort = 5555, liveWatch = { samplesPerSecond = 8 } })
+assert(
+  watch.host == 'debug-host' and watch.port == 5555 and watch.rate == 8,
+  'configure did not hydrate endpoint state'
+)
+watch.active = false
+live_watch.on_session_start(listener_config)
+assert(watch.target_state == 'running' and watch.session_config == listener_config, 'session start lifecycle failed')
+live_watch.on_session_continued()
+assert(watch.target_state == 'running', 'continued lifecycle failed')
+stopped = true
+session.stopped_thread_id = 1
+session.current_frame = { id = 1 }
+live_watch.on_session_stopped()
+assert(watch.target_state == 'stopped', 'stopped lifecycle failed')
+live_watch.on_session_end()
+assert(watch.target_state == nil and watch.session_config == nil, 'session end lifecycle failed')
+
+watch.winid = 999999
+watch.active = true
+assert(live_watch.on_window_closed('999999') == true, 'window close lifecycle ignored watch window')
+assert(watch.winid == nil and not watch.active, 'window close lifecycle did not stop watch')
+watch.telnet = telnet
+watch.active = true
+live_watch.shutdown()
+assert(not watch.active and watch.target_state == nil and watch.telnet == nil, 'shutdown lifecycle failed')
+
+print('live watch module/delegation/hydration/lifecycle: ok')
 vim.cmd('qa!')
