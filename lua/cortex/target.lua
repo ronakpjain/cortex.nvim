@@ -169,10 +169,7 @@ local function format_item(config)
   )
 end
 
-P._project = project
 P._storage_path = storage_path
-P._configs_for = configs_for
-P._match = match
 
 ---Select and persist a launch configuration for the current workspace.
 ---@param callback fun(config: table|nil)|nil

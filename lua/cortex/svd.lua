@@ -740,8 +740,6 @@ local function build_model(root)
     model.peripherals[#model.peripherals + 1] = peripheral
     model.peripherals_by_name[name] = peripheral
   end
-  -- Common singular aliases make interactive consumers less verbose.
-  model.peripheral_by_name = model.peripherals_by_name
   return model
 end
 
@@ -772,8 +770,5 @@ function M.load_file(path, callback)
   end
   return model, parse_err
 end
-
-M.load = M.load_file
-M.parse_file = M.load_file
 
 return M
