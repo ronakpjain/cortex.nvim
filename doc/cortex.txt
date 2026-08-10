@@ -1,0 +1,301 @@
+*cortex.txt*              ARM Cortex-M debugging              *cortex.nvim*
+                                                                  *cortex*
+
+cortex.nvim provides a GDB/MI DAP adapter, OpenOCD Live Watch, and stopped
+CMSIS-SVD, FreeRTOS, and call-stack views for Neovim.
+
+=============================================================================
+CONTENTS                                                     *cortex-contents*
+
+1. Requirements |cortex-requirements|
+2. Setup |cortex-setup|
+3. Launch options |cortex-launch-options|
+4. Commands |cortex-commands|
+5. View keymaps |cortex-keymaps|
+6. nvim-dap-ui |cortex-dap-ui|
+7. Lua API |cortex-api|
+8. Troubleshooting |cortex-troubleshooting|
+
+=============================================================================
+1. REQUIREMENTS  *cortex-requirements*
+
+- Neovim 0.10 or newer.
+- nvim-dap, available when |cortex-setup| runs.
+- arm-none-eabi-gdb, or another GDB configured in the launch entry.
+- OpenOCD, unless connecting to an external GDB server. Live Watch and SVD
+  register reads still require an OpenOCD-compatible telnet endpoint.
+
+=============================================================================
+2. SETUP  *cortex-setup* *cortex-config*
+
+setup() is required. It registers the adapter, listeners, and user commands.
+For example: >lua
+
+  require('cortex').setup({
+    mouse = true,
+    peripheral = {
+      svdFile = '${workspaceFolder}/support/device.svd',
+      host = '127.0.0.1', port = 4444,
+      timeout_ms = 1000, read_all = false,
+    },
+    rtos = {
+      enabled = false,
+      auto_open = false,
+      auto_refresh_on_stop = false,
+      max_tasks = 128,
+    },
+    callstack = {
+      auto_open = false,
+      auto_refresh_on_stop = false,
+      levels = 0,
+    },
+    live_watch = {
+      auto_open = true,
+      samples_per_second = 4,
+      host = '127.0.0.1', port = 4444,
+      timeout_ms = 1000,
+      max_depth = 4, max_children = 32,
+      expressions = {},
+    },
+    window = {
+      position = 'right',
+      width = 60, height = 12,
+      border = 'rounded',
+      focus_on_open = false,
+    },
+  })
+<
+TOP-LEVEL OPTIONS
+
+nvim                    Neovim executable hosting the adapter. Default:
+                        |v:progpath|.
+adapter_path            Adapter entry script. Default: bundled script.
+adapter_args            Arguments appended after the script. Default: {}.
+adapter_name            Name in dap.adapters. Default: "cortex-debug".
+filetypes               Legacy load_launchjs() mapping. Default: c, cpp, rust,
+                        asm.
+mouse                   Append "a" to 'mouse'. Default: true.
+window                  Shared position, width, height, border, and
+                        focus_on_open settings.
+
+VIEW OPTIONS
+
+peripheral              svdFile, svdPath, host, port, timeout_ms, read_all,
+                        and window. svdFile takes precedence over svdPath.
+rtos                    enabled, auto_open, auto_refresh_on_stop, max_tasks,
+                        max_priorities, tcb_type, list_item_type,
+                        stack_growth, stack_word_bytes, symbols, fields, and
+                        window.
+callstack               auto_open, auto_refresh_on_stop, levels, and window.
+live_watch              auto_open, samples_per_second, host, port, timeout_ms,
+                        max_depth, max_children, and expressions.
+
+Per-view window tables override the shared window table. Configuration tables
+are deep-merged with defaults.
+
+=============================================================================
+3. LAUNCH OPTIONS                                     *cortex-launch-options*
+
+Use type "cortex-debug" in .vscode/launch.json. A typical entry is: >json
+
+  {
+    "name": "Debug firmware",
+    "type": "cortex-debug",
+    "request": "launch",
+    "cwd": "${workspaceFolder}",
+    "executable": "${workspaceFolder}/build/app.elf",
+    "servertype": "openocd",
+    "configFiles": ["interface/stlink.cfg", "target/stm32f4x.cfg"],
+    "gdbPath": "arm-none-eabi-gdb",
+    "serverpath": "openocd",
+    "gdbPort": 3333,
+    "telnetPort": 4444,
+    "runToEntryPoint": "main",
+    "liveWatch": { "enabled": true, "samplesPerSecond": 4 }
+  }
+<
+SESSION AND TOOLCHAIN
+
+request                 "launch" (default) or "attach". Attach skips the
+                        launch reset/download sequence.
+executable, program     ELF for symbols and launch download.
+cwd                     GDB and OpenOCD working directory.
+                        Default: editor cwd.
+servertype, serverType  "openocd" (default) or "external".
+gdbPath                 GDB executable. Default: <toolchainPrefix>-gdb.
+toolchainPrefix         Default: arm-none-eabi.
+toolchainPath           Directory prepended to a bare GDB name.
+gdbArgs, debuggerArgs   Extra GDB arguments.
+gdbTarget               Server host or host:port. Default: localhost:gdbPort.
+gdbPort                 Default: 3333.
+env                     Additional GDB/OpenOCD environment values.
+
+OPENOCD AND STARTUP
+
+serverpath, serverPath  OpenOCD executable. Default: openocd.
+configFiles             Files passed with -f.
+searchDir               Directories passed with -s.
+serverArgs              Additional OpenOCD arguments.
+openOCDLaunchCommands   Commands passed with -c. The lowercase-d variant
+openocdLaunchCommands   is also accepted.
+telnetPort              Default: 4444.
+serverStartTimeout      Default: 20 seconds; values above 1000 mean ms.
+loadFiles               Set false to skip download. Default: true.
+runToEntryPoint         Temporary entry breakpoint followed by continue.
+runToMain               Legacy alias for runToEntryPoint = "main".
+stopAtEntry             Stay stopped after setup. Default: true.
+noDebug                 Continue after configuration. Default: false.
+
+COMMAND LISTS
+
+preLaunchCommands, postLaunchCommands
+preAttachCommands, postAttachCommands
+                        GDB console commands, or MI commands prefixed with -.
+overrideLaunchCommands  Replace the default reset/download/reset sequence.
+overrideAttachCommands  Commands after the attach connection.
+
+VIEW FIELDS
+
+liveWatch               enabled, samplesPerSecond, telnetPort, maxDepth,
+                        maxChildren. Sampling is capped at 20 Hz.
+svdFile, svdPath        SVD file; svdFile takes precedence.
+telnetHost              Live Watch host; openocdTelnetHost is an alias.
+openocdTelnetPort       Alternative top-level telnet port.
+svdTelnetHost           Peripheral host; peripheralTelnetHost is an alias.
+svdTelnetPort           Peripheral port; peripheralTelnetPort is an alias.
+rtos                    enabled, autoOpen, autoRefreshOnStop, maxTasks,
+                        maxPriorities, tcbType, listItemType, stackGrowth,
+                        stackWordBytes, symbols, fields.
+callstack               autoOpen, autoRefreshOnStop, levels. stackLevels is
+                        an alias for levels.
+
+The adapter can expand workspaceFolder, workspaceRoot, cwd, userHome, file,
+fileDirname, fileBasename, fileBasenameNoExtension, and pathSeparator ${...}
+placeholders.
+
+=============================================================================
+4. COMMANDS                                                *cortex-commands*
+
+TARGET
+
+:CortexDebugStart       Continue an active session or run/select the saved
+                        target.
+:CortexDebugSelect      Select and remember a workspace target.
+:CortexDebugTarget      Show the remembered target.
+:CortexDebugClearTarget Forget the remembered target.
+
+The nearest .vscode/launch.json defines the workspace. Selections are stored
+under stdpath('state')/cortex.nvim/targets.json.
+
+WATCH
+
+:CortexDebugWatch             Toggle Live Watch.
+:CortexDebugWatchAdd [expr]   Add an expression; prompt if omitted.
+:CortexDebugWatchClear        Remove all expressions.
+:CortexDebugTelnet [command]  Send an OpenOCD command; prompt if omitted.
+
+VIEWS
+
+:CortexDebugPeripheral          Toggle SVD peripherals.
+:CortexDebugPeripheralRefresh   Read registers while stopped.
+:CortexDebugRTOS                Toggle FreeRTOS tasks.
+:CortexDebugRTOSRefresh         Walk tasks while stopped.
+:CortexFreeRTOS                 Alias for :CortexDebugRTOS.
+:CortexDebugCallStack           Toggle the current-thread stack.
+:CortexDebugCallStackRefresh    Refresh the stack while stopped.
+:CortexDebugStack               Alias for :CortexDebugCallStack.
+
+=============================================================================
+5. VIEW KEYMAPS                                             *cortex-keymaps*
+
+All mappings are buffer-local.
+
+Live Watch              a add, d delete, c clear, r refresh, q close
+SVD peripherals         <CR> expand/collapse, r refresh, q close
+FreeRTOS tasks          r refresh, q close
+Call stack              <CR> select frame, r refresh, q close
+
+Mouse clicks perform the row action in SVD and call-stack views and position
+the cursor in the RTOS view. A single Live Watch click positions the cursor.
+
+Live Watch resolves C-expression metadata through DAP/GDB while stopped, then
+samples memory through OpenOCD telnet while running. Raw addresses and OpenOCD
+commands sample directly. Resolve a new C expression while stopped.
+
+SVD, FreeRTOS, and call-stack refreshes are stopped-only. The call-stack view
+shows the current DAP thread; it is not a per-FreeRTOS-task unwinder.
+
+=============================================================================
+6. NVIM-DAP-UI                                               *cortex-dap-ui*
+
+Register Cortex elements before dapui.setup(): >lua
+
+  local cortex = require('cortex')
+  local dapui = require('dapui')
+
+  dapui.register_element('cortex_callstack', cortex.callstack_element())
+  dapui.register_element('cortex_rtos', cortex.rtos_element())
+  dapui.register_element('cortex_peripherals', cortex.peripheral_element())
+<
+Use those IDs in normal dap-ui layouts. cortex.close_views() closes standalone
+Cortex windows and cancels pending reads.
+
+=============================================================================
+7. LUA API                                                        *cortex-api*
+
+Call require('cortex').setup() before using the API. >lua
+
+  local cortex = require('cortex')
+<
+Configuration            setup(opts)
+
+Adapter paths            adapter_nvim(), adapter_script()
+
+Live Watch               start(opts), stop(opts), open(), close(), toggle(),
+                         add(expr), clear(), remove_at_line(line), refresh(),
+                         telnet(command, callback), status()
+
+Peripherals              peripheral_open(), peripheral_close(),
+                         peripheral_toggle(), peripheral_refresh(callback),
+                         peripheral_load(config), peripheral_element()
+
+FreeRTOS                 rtos_open(), rtos_close(), rtos_toggle(),
+                         rtos_refresh(callback), rtos_element()
+
+Call stack               callstack_open(), callstack_close(),
+                         callstack_toggle(), callstack_refresh(callback),
+                         callstack_element()
+
+Targets                  debug_start(), debug_select(), debug_target(),
+                         debug_clear_target()
+
+All views                close_views()
+
+Callbacks use (error, data) where applicable. Underscore-prefixed fields are
+internal.
+
+=============================================================================
+8. TROUBLESHOOTING                                  *cortex-troubleshooting*
+
+- Missing commands or adapter: load nvim-dap first and call setup().
+- Missing target: start below a project containing .vscode/launch.json.
+- GDB/OpenOCD startup errors: try absolute gdbPath and serverpath values, then
+  inspect nvim-dap output and |:messages|.
+- External server errors: verify gdbTarget/gdbPort and start the server first.
+- SVD/RTOS errors: stop the target; verify the SVD path, firmware debug info,
+  and rtos.symbols/rtos.fields overrides.
+- Live Watch symbol errors: stop once and refresh to hydrate expression data.
+- Telnet errors: verify the host and telnetPort; external GDB servers do not
+  necessarily expose OpenOCD telnet.
+
+Enable adapter and GDB/MI logging before starting Neovim: >sh
+
+  CORTEX_DAP_LOG=/tmp/cortex-dap.log nvim
+  # CORTEX_DAP_LOG=1 writes to stderr
+<
+Run the repository tests with: >sh
+
+  ./tests/run.sh
+<
+=============================================================================
+vim:tw=78:ts=8:noet:ft=help:norl:
