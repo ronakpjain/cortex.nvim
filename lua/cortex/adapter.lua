@@ -1,25 +1,10 @@
---- cortex.nvim -- pure Lua Debug Adapter Protocol adapter for ARM Cortex-M.
----
---- Runs inside a headless Neovim instance (see `adapter_main.lua`):
----
----   nvim --headless --clean -u NONE -l lua/cortex/adapter_main.lua
----
---- It speaks DAP (Content-Length framed JSON) on stdin/stdout, drives
---- `arm-none-eabi-gdb --interpreter=mi2` and, for `servertype == "openocd"`,
---- spawns and supervises an OpenOCD GDB server.
----
---- Only Neovim/libuv APIs are used -- no external Lua dependencies, no Python.
----
---- Deliberately out of scope: pre/postLaunchTask, SVD parsing, peripheral
---- register views, RTOS views, semihosting UIs.
+---Pure Lua Debug Adapter Protocol adapter for ARM Cortex-M targets.
 
 local uv = vim.uv or vim.loop
 
 local M = {}
 
-----------------------------------------------------------------------------
--- Logging (stdout is the DAP channel, so logs go to stderr or a file)
-----------------------------------------------------------------------------
+-- Logging must never write to stdout because stdout carries DAP messages.
 
 local LOG_ENV = 'CORTEX_DAP_LOG'
 local log_file = nil
@@ -59,538 +44,35 @@ end
 
 M._log = log
 
-----------------------------------------------------------------------------
--- Small helpers
-----------------------------------------------------------------------------
+local util = require('cortex.dap.util')
+local protocol = require('cortex.dap.protocol')
+local mi = require('cortex.dap.mi')
 
----@param value any
----@return table
-local function as_list(value)
-  if value == nil or value == vim.NIL then
-    return {}
-  end
-  if type(value) == 'table' then
-    if next(value) == nil then
-      return {}
-    end
-    if value[1] ~= nil then
-      return value
-    end
-    return { value }
-  end
-  return { value }
-end
+local as_list = util.as_list
+local as_int = util.as_int
+local mi_quote = util.mi_quote
+local is_dict = util.is_dict
+local basename = util.basename
+local dirname = util.dirname
+local expanduser = util.expanduser
+local is_abs = util.is_abs
+local normalize = util.normalize
+local join = util.join
+local file_exists = util.file_exists
+local Reader = protocol.Reader
+
 M.as_list = as_list
-
----@param value any
----@param default integer|nil
----@return integer
-local function as_int(value, default)
-  default = default or 0
-  if type(value) == 'number' then
-    return math.floor(value)
-  end
-  if type(value) ~= 'string' then
-    return default
-  end
-  local text = vim.trim(value)
-  local hex = text:match('^0[xX](%x+)')
-  if hex then
-    return tonumber(hex, 16) or default
-  end
-  local dec = text:match('^%-?%d+')
-  if dec then
-    return tonumber(dec, 10) or default
-  end
-  return default
-end
 M.as_int = as_int
-
----@param text any
----@return string
-local function mi_quote(text)
-  local s = tostring(text)
-  s = s:gsub('\\', '\\\\'):gsub('"', '\\"')
-  return '"' .. s .. '"'
-end
 M.mi_quote = mi_quote
-
-local function is_dict(t)
-  return type(t) == 'table' and next(t) ~= nil and t[1] == nil
-end
-
-local function basename(path)
-  return (tostring(path):gsub('.*/', ''))
-end
-
-local function dirname(path)
-  local dir = tostring(path):match('^(.*)/[^/]*$')
-  return dir or ''
-end
-
-local function expanduser(path)
-  path = tostring(path)
-  if path:sub(1, 1) == '~' then
-    local home = os.getenv('HOME') or ''
-    if path == '~' then
-      return home
-    end
-    if path:sub(2, 2) == '/' then
-      return home .. path:sub(2)
-    end
-  end
-  return path
-end
-
-local function is_abs(path)
-  return tostring(path):sub(1, 1) == '/'
-end
-
-local function normalize(path)
-  path = tostring(path):gsub('/+', '/')
-  local parts = {}
-  for part in path:gmatch('[^/]+') do
-    if part == '.' then -- skip
-    elseif part == '..' and #parts > 0 and parts[#parts] ~= '..' then
-      table.remove(parts)
-    else
-      parts[#parts + 1] = part
-    end
-  end
-  local out = table.concat(parts, '/')
-  if is_abs(path) then
-    out = '/' .. out
-  end
-  return out
-end
-
-local function join(a, b)
-  if b == nil or b == '' then
-    return a
-  end
-  if is_abs(b) then
-    return normalize(b)
-  end
-  return normalize(a .. '/' .. b)
-end
-
-local function file_exists(path)
-  local stat = uv.fs_stat(path)
-  return stat ~= nil
-end
-
-----------------------------------------------------------------------------
--- ${...} variable expansion (fallback when the editor did not expand them)
-----------------------------------------------------------------------------
-
----@param config table
----@param cwd string|nil
----@return table
-function M.build_variable_table(config, cwd)
-  config = config or {}
-  local workspace = config.workspaceRoot
-    or config.workspaceroot
-    or config.workspaceFolder
-    or config.workspacefolder
-    or config.cwd
-    or cwd
-    or uv.cwd()
-  workspace = tostring(workspace)
-  -- nvim-dap expands `${workspaceFolder}` but older versions (and some
-  -- launch.json files) still pass workspace placeholders through. Treat the
-  -- canonical spellings and lowercase variants as the Neovim working
-  -- directory instead of making a literal directory named `${workspaceRoot}`.
-  local workspace_placeholder = workspace:lower()
-  if
-    workspace_placeholder == '${workspaceroot}'
-    or workspace_placeholder == '${workspacefolder}'
-    or workspace_placeholder == '${cwd}'
-  then
-    workspace = cwd or uv.cwd()
-  end
-  workspace = normalize(expanduser(workspace))
-  if not is_abs(workspace) then
-    workspace = join(uv.cwd(), workspace)
-  end
-  local table_ = {
-    workspaceRoot = workspace,
-    workspaceFolder = workspace,
-    workspaceroot = workspace,
-    workspacefolder = workspace,
-    cwd = workspace,
-    userHome = os.getenv('HOME') or '',
-    pathSeparator = '/',
-  }
-  local current_file = config.file or os.getenv('CORTEX_CURRENT_FILE')
-  if current_file and current_file ~= '' then
-    current_file = normalize(expanduser(tostring(current_file)))
-    table_.file = current_file
-    table_.fileDirname = dirname(current_file)
-    table_.fileBasename = basename(current_file)
-    table_.fileBasenameNoExtension = (basename(current_file):gsub('%.[^.]*$', ''))
-  end
-  return table_
-end
-
----Recursively expand `${name}` placeholders in strings/lists/dicts.
----@param value any
----@param variables table
----@return any
-function M.expand_variables(value, variables)
-  if type(value) == 'string' then
-    return (
-      value:gsub('%${([A-Za-z_][A-Za-z0-9_]*)}', function(key)
-        local replacement = variables[key]
-        if replacement == nil then
-          return '${' .. key .. '}'
-        end
-        return tostring(replacement)
-      end)
-    )
-  end
-  if type(value) == 'table' then
-    local out = {}
-    for k, v in pairs(value) do
-      out[k] = M.expand_variables(v, variables)
-    end
-    return out
-  end
-  return value
-end
-
-----------------------------------------------------------------------------
--- DAP wire framing
-----------------------------------------------------------------------------
-
----@param message table
----@return string
-function M.encode_message(message)
-  local body = vim.json.encode(message)
-  return string.format('Content-Length: %d\r\n\r\n%s', #body, body)
-end
-
---- Incremental Content-Length framed message reader.
----@class cortex.dap.Reader
-local Reader = {}
-Reader.__index = Reader
-
-function Reader.new()
-  return setmetatable({ buf = '' }, Reader)
-end
-
----Feed raw bytes; returns a list of decoded messages.
----@param chunk string
----@return table[] messages, string|nil err
-function Reader:feed(chunk)
-  self.buf = self.buf .. chunk
-  local messages = {}
-  while true do
-    local header_end = self.buf:find('\r\n\r\n', 1, true)
-    local sep = 4
-    if not header_end then
-      header_end = self.buf:find('\n\n', 1, true)
-      sep = 2
-    end
-    if not header_end then
-      return messages, nil
-    end
-    local header = self.buf:sub(1, header_end - 1)
-    local length = nil
-    for line in header:gmatch('[^\r\n]+') do
-      local name, value = line:match('^([^:]+):%s*(.*)$')
-      if name and name:lower() == 'content-length' then
-        length = tonumber(vim.trim(value))
-      end
-    end
-    if not length or length < 0 or length ~= math.floor(length) then
-      -- The body boundary is unknowable without a valid length. Drop the
-      -- buffered malformed frame so a later valid frame can be read instead
-      -- of repeatedly failing on the same header forever.
-      self.buf = ''
-      local err = length == nil and 'missing Content-Length header' or 'invalid Content-Length header'
-      return messages, err
-    end
-    local body_start = header_end + sep
-    if #self.buf < body_start + length - 1 then
-      return messages, nil
-    end
-    local body = self.buf:sub(body_start, body_start + length - 1)
-    self.buf = self.buf:sub(body_start + length)
-    local ok, decoded = pcall(vim.json.decode, body, { luanil = { object = true, array = true } })
-    if ok then
-      messages[#messages + 1] = decoded
-    else
-      log('json decode error:', tostring(decoded))
-    end
-  end
-end
-
+M.build_variable_table = util.build_variable_table
+M.expand_variables = util.expand_variables
+M.encode_message = protocol.encode_message
 M.Reader = Reader
+M.parse_c_string = mi.parse_c_string
+M.parse_mi_results = mi.parse_mi_results
+M.parse_mi_line = mi.parse_mi_line
 
-----------------------------------------------------------------------------
--- GDB/MI parsing
-----------------------------------------------------------------------------
-
-local C_ESCAPES = {
-  n = '\n',
-  t = '\t',
-  r = '\r',
-  a = '\a',
-  b = '\b',
-  f = '\f',
-  v = '\v',
-  ['\\'] = '\\',
-  ['"'] = '"',
-  ["'"] = "'",
-}
-
-local STREAM_KINDS = { ['~'] = 'console', ['@'] = 'target', ['&'] = 'log' }
-local ASYNC_KINDS = { ['*'] = 'exec', ['+'] = 'status', ['='] = 'notify' }
-
----Parse a MI C-string starting at `text:sub(index, index) == '"'`.
----@param text string
----@param index integer 1-based
----@return string value, integer next_index
-function M.parse_c_string(text, index)
-  index = index or 1
-  if text:sub(index, index) ~= '"' then
-    error(string.format("expected '\"' at position %d in %q", index, text))
-  end
-  index = index + 1
-  local out = {}
-  local n = #text
-  while index <= n do
-    local ch = text:sub(index, index)
-    if ch == '"' then
-      return table.concat(out), index + 1
-    end
-    if ch ~= '\\' then
-      out[#out + 1] = ch
-      index = index + 1
-    else
-      index = index + 1
-      if index > n then
-        break
-      end
-      local esc = text:sub(index, index)
-      if C_ESCAPES[esc] then
-        out[#out + 1] = C_ESCAPES[esc]
-        index = index + 1
-      elseif esc == 'x' then
-        index = index + 1
-        local digits = text:match('^%x%x?', index) or ''
-        index = index + #digits
-        out[#out + 1] = #digits > 0 and string.char(tonumber(digits, 16) % 256) or 'x'
-      elseif esc:match('%d') then
-        local digits = text:match('^[0-7][0-7]?[0-7]?', index) or ''
-        index = index + #digits
-        out[#out + 1] = string.char(tonumber(digits, 8) % 256)
-      else
-        out[#out + 1] = esc
-        index = index + 1
-      end
-    end
-  end
-  error(string.format('unterminated C-string in %q', text))
-end
-
-local function skip_ws(text, index)
-  local _, stop = text:find('^[ \t]*', index)
-  return (stop or index - 1) + 1
-end
-
-local function merge_result(store, name, value)
-  local existing = store[name]
-  if existing == nil then
-    store[name] = value
-  elseif type(existing) == 'table' and existing.__mi_multi then
-    existing[#existing + 1] = value
-  else
-    store[name] = { existing, value, __mi_multi = true }
-  end
-end
-
-local parse_mi_value, parse_mi_tuple, parse_mi_list, parse_mi_result
-
----@param text string
----@param index integer
----@return any value, integer next_index
-function parse_mi_value(text, index)
-  index = skip_ws(text, index or 1)
-  if index > #text then
-    error(string.format('unexpected end of MI value in %q', text))
-  end
-  local ch = text:sub(index, index)
-  if ch == '"' then
-    return M.parse_c_string(text, index)
-  elseif ch == '{' then
-    return parse_mi_tuple(text, index)
-  elseif ch == '[' then
-    return parse_mi_list(text, index)
-  end
-  local stop = index
-  while stop <= #text and not text:sub(stop, stop):match('[,}%]]') do
-    stop = stop + 1
-  end
-  return vim.trim(text:sub(index, stop - 1)), stop
-end
-
-function parse_mi_tuple(text, index)
-  index = index + 1
-  local out = {}
-  index = skip_ws(text, index)
-  if text:sub(index, index) == '}' then
-    return out, index + 1
-  end
-  while index <= #text do
-    local name, value
-    name, value, index = parse_mi_result(text, index)
-    merge_result(out, name or 'value', value)
-    index = skip_ws(text, index)
-    local ch = text:sub(index, index)
-    if ch == ',' then
-      index = index + 1
-    elseif ch == '}' then
-      return out, index + 1
-    else
-      break
-    end
-  end
-  error(string.format('unterminated tuple in %q', text))
-end
-
-function parse_mi_list(text, index)
-  index = index + 1
-  local out = {}
-  index = skip_ws(text, index)
-  if text:sub(index, index) == ']' then
-    return out, index + 1
-  end
-  while index <= #text do
-    local _, value
-    _, value, index = parse_mi_result(text, index)
-    out[#out + 1] = value
-    index = skip_ws(text, index)
-    local ch = text:sub(index, index)
-    if ch == ',' then
-      index = index + 1
-    elseif ch == ']' then
-      return out, index + 1
-    else
-      break
-    end
-  end
-  error(string.format('unterminated list in %q', text))
-end
-
----@return string|nil name, any value, integer next_index
-function parse_mi_result(text, index)
-  index = skip_ws(text, index)
-  local ch = text:sub(index, index)
-  if ch == '"' or ch == '{' or ch == '[' then
-    local value
-    value, index = parse_mi_value(text, index)
-    return nil, value, index
-  end
-  local name = text:match('^[A-Za-z_][A-Za-z0-9_%-]*', index)
-  if not name then
-    local value
-    value, index = parse_mi_value(text, index)
-    return nil, value, index
-  end
-  index = index + #name
-  index = skip_ws(text, index)
-  if text:sub(index, index) == '=' then
-    local value
-    value, index = parse_mi_value(text, index + 1)
-    return name, value, index
-  end
-  return nil, name, index
-end
-
----Parse a comma separated MI result list into a table.
----@param text string
----@param index integer|nil
----@return table
-function M.parse_mi_results(text, index)
-  local out = {}
-  index = skip_ws(text, index or 1)
-  while index <= #text do
-    if text:sub(index, index) == ',' then
-      index = index + 1
-    else
-      local name, value
-      name, value, index = parse_mi_result(text, index)
-      merge_result(out, name or 'value', value)
-      index = skip_ws(text, index)
-      if text:sub(index, index) == ',' then
-        index = index + 1
-      else
-        break
-      end
-    end
-  end
-  return out
-end
-
----Parse one GDB/MI output line into a record table.
----
----   { type = 'result',   token = n|nil, class = str, results = {} }
----   { type = 'exec'|'status'|'notify', token = n|nil, class = str, results = {} }
----   { type = 'stream',   stream = 'console'|'target'|'log', output = str }
----   { type = 'prompt' }
----   { type = 'unknown',  raw = str }
----@param line string|nil
----@return table
-function M.parse_mi_line(line)
-  if line == nil then
-    return { type = 'unknown', raw = '' }
-  end
-  line = line:gsub('[\r\n]+$', '')
-  if vim.trim(line) == '' then
-    return { type = 'unknown', raw = line }
-  end
-  if vim.trim(line) == '(gdb)' then
-    return { type = 'prompt' }
-  end
-
-  local token_text, kind, rest = line:match('^(%d*)([%^%*%+=~@&])(.*)$')
-  if not kind then
-    return { type = 'unknown', raw = line }
-  end
-  local token = (token_text ~= '' and tonumber(token_text)) or nil
-
-  if STREAM_KINDS[kind] then
-    local ok, output = pcall(M.parse_c_string, rest, 1)
-    if not ok then
-      output = rest
-    end
-    return { type = 'stream', stream = STREAM_KINDS[kind], output = output }
-  end
-
-  local class_name = rest:match('^[A-Za-z0-9_%-]*') or ''
-  local index = #class_name + 1
-  index = skip_ws(rest, index)
-  if rest:sub(index, index) == ',' then
-    index = index + 1
-  end
-  local ok, results = pcall(M.parse_mi_results, rest, index)
-  if not ok then
-    log('MI parse error:', tostring(results), 'line:', line)
-    results = {}
-  end
-
-  return {
-    type = kind == '^' and 'result' or ASYNC_KINDS[kind],
-    token = token,
-    class = class_name,
-    results = results,
-  }
-end
-
-----------------------------------------------------------------------------
--- Coroutine helpers (all blocking work happens inside tasks)
-----------------------------------------------------------------------------
+-- Coroutine tasks
 
 local function resume(co, ...)
   if coroutine.status(co) ~= 'suspended' then
@@ -628,9 +110,7 @@ local function sleep(ms)
   coroutine.yield()
 end
 
-----------------------------------------------------------------------------
--- Environment / process helpers
-----------------------------------------------------------------------------
+-- Process environment
 
 local function build_env(extra)
   local env = {}
@@ -644,9 +124,7 @@ local function build_env(extra)
   return env
 end
 
-----------------------------------------------------------------------------
--- GDB session
-----------------------------------------------------------------------------
+-- GDB/MI process
 
 ---@class cortex.dap.GDB
 local GDB = {}
@@ -758,7 +236,7 @@ function GDB:_on_stdout(chunk)
 end
 
 function GDB:_handle_line(line)
-  local record = M.parse_mi_line(line)
+  local record = mi.parse_mi_line(line, log)
   local kind = record.type
   if kind == 'stream' then
     local text = record.output or ''
@@ -927,9 +405,7 @@ end
 
 M.GDB = GDB
 
-----------------------------------------------------------------------------
--- GDB server (OpenOCD)
-----------------------------------------------------------------------------
+-- OpenOCD process
 
 ---@class cortex.dap.Server
 local Server = {}
@@ -1140,9 +616,7 @@ function M.build_openocd_argv(config, server_path)
   return argv
 end
 
-----------------------------------------------------------------------------
--- Debug adapter
-----------------------------------------------------------------------------
+-- DAP session
 
 local STOP_REASONS = {
   ['breakpoint-hit'] = 'breakpoint',
@@ -1171,7 +645,7 @@ Adapter.__index = Adapter
 function Adapter.new()
   return setmetatable({
     seq = 0,
-    reader = Reader.new(),
+    reader = Reader.new(log),
     queue = {},
     busy = false,
     running = true,
@@ -1191,7 +665,7 @@ function Adapter.new()
   }, Adapter)
 end
 
--- -- io ---------------------------------------------------------------------
+-- DAP output
 
 function Adapter:_write(message)
   self.seq = self.seq + 1
@@ -1241,7 +715,7 @@ function Adapter:output(text, category)
   self:send_event('output', { category = category or 'console', output = tostring(text) })
 end
 
--- -- request dispatch --------------------------------------------------------
+-- Request dispatch
 
 function Adapter:handle_message(message)
   if type(message) ~= 'table' or message.type ~= 'request' then
@@ -1298,7 +772,7 @@ function Adapter:run_request(request, on_done)
   end)
 end
 
--- -- lifecycle ---------------------------------------------------------------
+-- Session lifecycle
 
 function Adapter:on_initialize(request)
   self:send_response(request, {
@@ -1720,7 +1194,7 @@ function Adapter:_on_gdb_exit()
   end
 end
 
--- -- async gdb records --------------------------------------------------------
+-- Asynchronous GDB records
 
 function Adapter:_on_gdb_async(record)
   local class = record.class
@@ -1798,7 +1272,7 @@ function Adapter:_handle_stopped(results)
   self:send_event('stopped', body)
 end
 
--- -- breakpoints ---------------------------------------------------------------
+-- Breakpoints
 
 function Adapter:on_setBreakpoints(request)
   local args = request.arguments or {}
@@ -1904,7 +1378,7 @@ function Adapter:on_setExceptionBreakpoints(request)
   self:send_response(request, { breakpoints = {} })
 end
 
--- -- execution ------------------------------------------------------------------
+-- Execution
 
 function Adapter:_require_gdb()
   if not self.gdb or not self.gdb:is_alive() then
@@ -1967,7 +1441,7 @@ function Adapter:on_stepOut(request)
   self:_step(request, '-exec-finish')
 end
 
--- -- inspection ------------------------------------------------------------------
+-- Inspection
 
 function Adapter:on_threads(request)
   if not self.gdb or not self.gdb:is_alive() then
@@ -2400,9 +1874,7 @@ end
 
 M.Adapter = Adapter
 
-----------------------------------------------------------------------------
--- Entry point
-----------------------------------------------------------------------------
+-- Process entry point
 
 ---Run the adapter until stdin closes or the client disconnects.
 ---@param opts table|nil
