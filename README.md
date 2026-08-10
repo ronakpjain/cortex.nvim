@@ -60,6 +60,7 @@ require('cortex').setup({
     port = 4444,
     timeout_ms = 1000,
     read_all = false,          -- refresh only expanded peripherals by default
+    window = nil,              -- optional override of the shared window settings
   },
 
   rtos = {
@@ -73,12 +74,16 @@ require('cortex').setup({
     -- Override symbols/fields when a kernel or port renames them.
     symbols = {},
     fields = {},
+    stack_growth = -1,         -- -1: descending stack; 1: ascending stack
+    stack_word_bytes = 4,
+    window = nil,             -- optional override of the shared window settings
   },
 
   callstack = {
     auto_open = false,
     auto_refresh_on_stop = false,
     levels = 0,
+    window = nil,             -- optional override of the shared window settings
   },
 
   live_watch = {
@@ -101,6 +106,11 @@ require('cortex').setup({
   },
 })
 ```
+
+Standalone views use `window` by default. Set `peripheral.window`,
+`rtos.window`, or `callstack.window` to a table with any of `position`,
+`width`, `height`, `border`, and `focus_on_open` to give that view its own
+layout.
 
 ## Debug configuration
 
@@ -207,7 +217,13 @@ Enable it in a launch configuration or open it manually:
 "rtos": {
   "enabled": true,
   "autoOpen": true,
-  "autoRefreshOnStop": false
+  "autoRefreshOnStop": false,
+  "maxTasks": 128,
+  "maxPriorities": 32,
+  "tcbType": "TCB_t",
+  "listItemType": "ListItem_t",
+  "stackGrowth": -1,
+  "stackWordBytes": 4
 }
 ```
 
@@ -222,8 +238,12 @@ Commands:
 The view reads `TCB_t`/`List_t` data through GDB and walks ready, blocked,
 pending, suspended, and termination lists. It displays the task name, state,
 priority, runtime counter, stack estimate, and TCB address. Missing optional
-kernel symbols are skipped; `rtos.symbols`, `rtos.fields`, `maxTasks`, and
-`maxPriorities` can override firmware-specific names and limits. It never
+kernel symbols are skipped. Setup tables `rtos.symbols` and `rtos.fields`
+can override firmware-specific names; `tcb_type`, `list_item_type`,
+`max_tasks`, `max_priorities`, `stack_growth`, and `stack_word_bytes` tune type
+names, traversal limits, and stack accounting. Launch configurations accept
+the corresponding camelCase keys shown above (`tcbType`, `listItemType`,
+`maxTasks`, `maxPriorities`, `stackGrowth`, and `stackWordBytes`). It never
 polls while running and never shares the Live Watch or SVD connections.
 
 ## Call-stack window
@@ -259,7 +279,8 @@ These views are intentionally separate:
 * **SVD peripheral view** is `:CortexDebugPeripheral`. It shows peripheral →
   register → bitfield rows from the SVD and reads register memory only after
   `:CortexDebugPeripheralRefresh` (or `r`) while the target is stopped. It
-  decodes register width/endianness, masks, and enumerated field names.
+  decodes register width/endianness, masks, and enumerated field names. Press
+  `<CR>` or click a peripheral or register row to expand or collapse it.
 * **FreeRTOS tasks** are shown by `:CortexDebugRTOS`. The view is a separate
   stopped-only GDB task-list walk; it is not merged into DAP threads, SVD
   values, or Live Watch polling.
@@ -286,9 +307,9 @@ values keep updating without halting the target.
 | `:CortexDebugTelnet [cmd]` | send a raw OpenOCD command |
 
 Inside the window: `a` add, `d` delete under cursor, `c` clear, `r` refresh,
-`q` close. Clicking a peripheral or register expands it, and clicking a
-call-stack row selects that frame. Enable Neovim
-mouse input with `vim.opt.mouse = 'a'` if your configuration does not already.
+`q` close. Enable Neovim mouse input with `vim.opt.mouse = 'a'` if your
+configuration does not already (or leave the default `mouse = true` setup
+option enabled).
 
 Entries can be a raw address (`0x20000010`), an OpenOCD command (`reg`,
 `mdw 0x20000000 4`, `targets`, …) or a C expression (`gpio_config`,
@@ -300,9 +321,15 @@ children. The resulting address/type plan is then sampled from OpenOCD telnet
 while the target runs; running samples never issue DAP/GDB requests. Add or
 refresh a new C expression while stopped, or stop once to hydrate it.
 
-Lua API: `require('cortex').start/stop/toggle/add/clear/refresh/telnet/status`.
-Persistent DAP target API: `debug_start()`, `debug_select()`,
-`debug_target()`, and `debug_clear_target()`.
+Public Lua API (after `local cortex = require('cortex')`): Live Watch uses
+`cortex.start()`, `cortex.stop()`, `cortex.open()`, `cortex.close()`,
+`cortex.toggle()`, `cortex.add()`, `cortex.clear()`, `cortex.refresh()`,
+`cortex.telnet()`, and `cortex.status()`. Persistent target selection uses
+`cortex.debug_start()`, `cortex.debug_select()`, `cortex.debug_target()`, and
+`cortex.debug_clear_target()`. Auxiliary views expose `peripheral_open()`,
+`peripheral_close()`, `peripheral_toggle()`, `peripheral_refresh()`, and
+`peripheral_element()`, with corresponding `rtos_*()` and `callstack_*()`
+functions. Underscore-prefixed members are internal.
 
 ## Debugging the adapter
 
@@ -317,10 +344,11 @@ CORTEX_DAP_LOG=/tmp/cortex-dap.log nvim   # or CORTEX_DAP_LOG=1 for stderr
 ```
 
 * syntax check of every Lua file
-* `tests/test_adapter.lua` — MI parser, DAP framing, `${}` expansion, OpenOCD
-  argv, capabilities, stop-event mapping, gdb path/target resolution
-* `tests/test_e2e.lua` — spawns the real adapter process and drives a full DAP
-  session (initialize → launch → breakpoints → configurationDone → stopped →
-  threads/stack/scopes/variables/evaluate → step/continue/pause →
-  terminate/disconnect) against `tests/fake_gdb.lua` and
-  `tests/fake_openocd.lua`
+* `tests/test_adapter.lua` — MI parsing, DAP framing, path expansion, adapter
+  capabilities, lifecycle cleanup, and stop-event mapping
+* `tests/test_telnet.lua` and `tests/test_ui.lua` — shared transport and pane
+  rendering helpers
+* focused suites for persistent targets, SVD parsing, peripherals, FreeRTOS,
+  call stacks, and Live Watch hydration
+* `tests/test_e2e.lua` and `tests/test_attach.lua` — full launch and attach DAP
+  sessions against the bundled fake GDB and OpenOCD processes
