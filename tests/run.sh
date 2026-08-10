@@ -10,7 +10,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 nvim=${NVIM:-nvim}
 
 echo "== syntax check =="
-for f in "$root"/lua/cortex/*.lua "$root"/tests/*.lua; do
+for f in "$root"/lua/cortex/*.lua "$root"/lua/cortex/dap/*.lua "$root"/tests/*.lua; do
   "$nvim" --headless --clean -u NONE -l /dev/stdin "$f" <<'EOF'
 local path = _G.arg[1]
 local fn, err = loadfile(path)
@@ -31,8 +31,16 @@ echo "== OpenOCD telnet transport tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_telnet.lua"
 
 echo
+echo "== shared configuration/session tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_shared.lua"
+
+echo
 echo "== shared UI helper tests =="
 "$nvim" --headless --clean -u NONE -l "$root/tests/test_ui.lua"
+
+echo
+echo "== shared view lifecycle tests =="
+"$nvim" --headless --clean -u NONE -l "$root/tests/test_view.lua"
 
 echo
 echo "== persistent target tests =="
