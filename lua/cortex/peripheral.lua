@@ -43,6 +43,18 @@ local pane = view.new(state, {
   },
 })
 
+local DEFAULTS = {
+  auto_refresh_on_stop = true,
+}
+
+local function view_options()
+  local base = (core and core.config and core.config.peripheral) or {}
+  local launch = config_util.get(state.session_config, 'peripheral')
+  return config_util.merge(DEFAULTS, base, launch, {
+    auto_refresh_on_stop = 'autoRefreshOnStop',
+  })
+end
+
 local function setting(name)
   local cfg = core and core.config or {}
   local pcfg = cfg.peripheral or {}
@@ -716,10 +728,14 @@ function P.on_session_continued()
 end
 
 function P.on_session_stopped()
-  if state.model then
-    state.status = 'stopped (refresh available)'
-    state.error = nil
-    render()
+  if not state.model then
+    return
+  end
+  state.status = 'stopped (refresh available)'
+  state.error = nil
+  render()
+  if (pane:win_valid() or state.element_mode) and view_options().auto_refresh_on_stop then
+    P.refresh()
   end
 end
 

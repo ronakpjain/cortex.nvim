@@ -108,6 +108,12 @@ check('handle decoded', by_name.worker and by_name.worker.address == '0x2000')
 check('exact task budget is not truncated', rtos._state.truncated == false)
 check('GDB octal string cleanup', rtos._parse_name('"worker\\000\\000"') == 'worker')
 
+core.config.rtos.auto_refresh_on_stop = true
+rtos._state.element_mode = true
+rtos.on_session_stopped()
+check('RTOS refreshes on stop when embedded', rtos._state.status == 'stopped / refreshed')
+rtos._state.element_mode = false
+
 current = false
 local running_error
 rtos.refresh(function(err)

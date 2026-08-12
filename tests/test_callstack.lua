@@ -49,6 +49,12 @@ check('frames loaded', #callstack._state.frames == 2)
 check('frame name retained', callstack._state.frames[2].name == 'worker')
 check('stopped status shown', callstack._state.status == 'stopped / refreshed')
 
+core.config.callstack.auto_refresh_on_stop = true
+callstack._state.element_mode = true
+callstack.on_session_stopped()
+check('call stack refreshes on stop when embedded', callstack._state.status == 'stopped / refreshed')
+callstack._state.element_mode = false
+
 stopped = false
 local running_error
 callstack.refresh(function(err)

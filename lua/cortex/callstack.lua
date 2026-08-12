@@ -42,7 +42,7 @@ local pane = view.new(state, {
 
 local DEFAULTS = {
   auto_open = false,
-  auto_refresh_on_stop = false,
+  auto_refresh_on_stop = true,
   levels = 0,
   window = nil,
 }

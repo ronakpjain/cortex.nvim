@@ -120,5 +120,13 @@ for _, highlight in ipairs(captured_highlights) do
 end
 check('peripheral address highlight uses rendered column', address_highlighted)
 
+fake_core._is_stopped = function()
+  return true
+end
+fake_core.config.peripheral.auto_refresh_on_stop = true
+local sent_before_stop = #sent
+peripheral.on_session_stopped()
+check('peripheral refreshes on stop when embedded', #sent > sent_before_stop)
+
 io.stdout:write(string.format('%d/%d peripheral checks passed\n', total - failures, total))
 os.exit(failures == 0 and 0 or 1)

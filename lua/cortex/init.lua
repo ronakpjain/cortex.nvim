@@ -17,6 +17,7 @@ local defaults = {
   mouse = true,
 
   peripheral = {
+    auto_refresh_on_stop = true,
     svdFile = nil,
     svdPath = nil,
     host = '127.0.0.1',
@@ -29,7 +30,7 @@ local defaults = {
   rtos = {
     enabled = false,
     auto_open = false,
-    auto_refresh_on_stop = false,
+    auto_refresh_on_stop = true,
     max_tasks = 128,
     max_priorities = nil,
     tcb_type = 'TCB_t',
@@ -43,7 +44,7 @@ local defaults = {
 
   callstack = {
     auto_open = false,
-    auto_refresh_on_stop = false,
+    auto_refresh_on_stop = true,
     levels = 0,
     window = nil,
   },
