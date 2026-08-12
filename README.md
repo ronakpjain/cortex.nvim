@@ -80,6 +80,7 @@ require('cortex').setup({
   mouse = true,
 
   peripheral = {
+    auto_refresh_on_stop = true,
     svdFile = '${workspaceFolder}/support/device.svd',
     host = '127.0.0.1',
     port = 4444,
@@ -90,7 +91,7 @@ require('cortex').setup({
   rtos = {
     enabled = false,
     auto_open = false,
-    auto_refresh_on_stop = false,
+    auto_refresh_on_stop = true,
     max_tasks = 128,
     max_priorities = nil,
     tcb_type = 'TCB_t',
@@ -103,7 +104,7 @@ require('cortex').setup({
 
   callstack = {
     auto_open = false,
-    auto_refresh_on_stop = false,
+    auto_refresh_on_stop = true,
     levels = 0,
   },
 
@@ -227,6 +228,7 @@ OpenOCD launch can be expanded as follows:
 | `openocdTelnetPort` | Alternative top-level telnet port. |
 | `svdTelnetHost`, `peripheralTelnetHost` | Peripheral-view host override. |
 | `svdTelnetPort`, `peripheralTelnetPort` | Peripheral-view port override. |
+| `peripheral` | `autoRefreshOnStop` and SVD/window options. |
 | `rtos` | `enabled`, `autoOpen`, `autoRefreshOnStop`, `maxTasks`, `maxPriorities`, `tcbType`, `listItemType`, `stackGrowth`, `stackWordBytes`, `symbols`, and `fields`. |
 | `callstack` | `autoOpen`, `autoRefreshOnStop`, and `levels`; `stackLevels` is an alias for `levels`. |
 
@@ -345,8 +347,12 @@ Underscore-prefixed fields are internal.
 - With `servertype = "external"`, start the server yourself and verify
   `gdbTarget` and `gdbPort`. Configure a separate telnet endpoint if using Live
   Watch or SVD registers.
-- SVD and FreeRTOS refreshes require a stopped target. Check the SVD path,
-  firmware debug information, and `rtos.symbols`/`rtos.fields` overrides.
+- SVD, FreeRTOS, and call-stack views refresh automatically whenever they are
+  open or embedded in dap-ui and the target stops. Set
+  `auto_refresh_on_stop = false` (or launch `autoRefreshOnStop = false`) on a
+  view to opt out. Manual refresh still requires a stopped target. Check the
+  SVD path, firmware debug information, and `rtos.symbols`/`rtos.fields`
+  overrides.
 - A new Live Watch C expression must be resolved while stopped before it can be
   sampled while running.
 

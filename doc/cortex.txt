@@ -34,6 +34,7 @@ For example: >lua
   require('cortex').setup({
     mouse = true,
     peripheral = {
+      auto_refresh_on_stop = true,
       svdFile = '${workspaceFolder}/support/device.svd',
       host = '127.0.0.1', port = 4444,
       timeout_ms = 1000, read_all = false,
@@ -41,12 +42,12 @@ For example: >lua
     rtos = {
       enabled = false,
       auto_open = false,
-      auto_refresh_on_stop = false,
+      auto_refresh_on_stop = true,
       max_tasks = 128,
     },
     callstack = {
       auto_open = false,
-      auto_refresh_on_stop = false,
+      auto_refresh_on_stop = true,
       levels = 0,
     },
     live_watch = {
@@ -80,8 +81,9 @@ window                  Shared position, width, height, border, and
 
 VIEW OPTIONS
 
-peripheral              svdFile, svdPath, host, port, timeout_ms, read_all,
-                        and window. svdFile takes precedence over svdPath.
+peripheral              auto_refresh_on_stop, svdFile, svdPath, host, port,
+                        timeout_ms, read_all, and window. svdFile takes
+                        precedence over svdPath.
 rtos                    enabled, auto_open, auto_refresh_on_stop, max_tasks,
                         max_priorities, tcb_type, list_item_type,
                         stack_growth, stack_word_bytes, symbols, fields, and
@@ -163,6 +165,7 @@ telnetHost              Live Watch host; openocdTelnetHost is an alias.
 openocdTelnetPort       Alternative top-level telnet port.
 svdTelnetHost           Peripheral host; peripheralTelnetHost is an alias.
 svdTelnetPort           Peripheral port; peripheralTelnetPort is an alias.
+peripheral              autoRefreshOnStop and SVD/window options.
 rtos                    enabled, autoOpen, autoRefreshOnStop, maxTasks,
                         maxPriorities, tcbType, listItemType, stackGrowth,
                         stackWordBytes, symbols, fields.
@@ -222,8 +225,11 @@ Live Watch resolves C-expression metadata through DAP/GDB while stopped, then
 samples memory through OpenOCD telnet while running. Raw addresses and OpenOCD
 commands sample directly. Resolve a new C expression while stopped.
 
-SVD, FreeRTOS, and call-stack refreshes are stopped-only. The call-stack view
-shows the current DAP thread; it is not a per-FreeRTOS-task unwinder.
+SVD, FreeRTOS, and call-stack refreshes are stopped-only. Visible or embedded
+views refresh automatically on each stop by default; set
+`auto_refresh_on_stop = false` in setup or `autoRefreshOnStop = false` in a
+launch entry to opt out. The call-stack view shows the current DAP thread; it
+is not a per-FreeRTOS-task unwinder.
 
 =============================================================================
 6. NVIM-DAP-UI                                               *cortex-dap-ui*
